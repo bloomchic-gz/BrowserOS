@@ -11,6 +11,8 @@ export function providerDescription(provider: LlmProviderConfig): string {
 
 /** A custom agent identifies itself by its launch command, not its adapter. */
 export function agentDescription(agent: AcpAgent): string {
+  if (agent.type === 'paperclip')
+    return agent.paperclipConfig?.url ?? 'Remote Paperclip agent'
   const isCustom = agent.type === 'custom'
   const primaryLabel =
     isCustom && agent.customConfig?.command
@@ -75,9 +77,15 @@ export function buildAgentActions(input: {
     { label: 'Set as default', onSelect: () => input.onSelectAgent(agent.id) },
   ]
 
-  if (agent.type === 'custom' && input.onEditAgent) {
+  if (
+    (agent.type === 'custom' || agent.type === 'paperclip') &&
+    input.onEditAgent
+  ) {
     const onEditAgent = input.onEditAgent
-    actions.push({ label: 'Edit', onSelect: () => onEditAgent(agent) })
+    actions.push({
+      label: agent.type === 'paperclip' ? 'Reconnect' : 'Edit',
+      onSelect: () => onEditAgent(agent),
+    })
   }
 
   actions.push({

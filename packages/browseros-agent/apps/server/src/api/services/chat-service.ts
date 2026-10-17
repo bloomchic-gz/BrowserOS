@@ -126,7 +126,8 @@ export class ChatService {
           if (
             request.target.type === 'claude' ||
             request.target.type === 'codex' ||
-            request.target.type === 'custom'
+            request.target.type === 'custom' ||
+            request.target.type === 'paperclip'
           ) {
             return await this.processAcpMessage(
               request as AcpChatRequest,
@@ -587,7 +588,7 @@ export class ChatService {
       this.acpMessages.get(historyKey) ??
       (await this.loadAcpDisplayHistory(agent.id, request))
     const priorHistoryLength = history.length
-    const messageId = crypto.randomUUID()
+    const messageId = request.clientMessageId ?? crypto.randomUUID()
     const files = (request.attachments ?? []).map((attachment) => ({
       type: 'file' as const,
       mediaType: attachment.mediaType,
@@ -605,7 +606,8 @@ export class ChatService {
         ...files,
       ],
     }
-    history.push(visibleUserMessage)
+    if (!history.some((message) => message.id === messageId))
+      history.push(visibleUserMessage)
     this.acpMessages.set(historyKey, history)
     this.acpConversationAgents.set(request.conversationId, agent.id)
     const promptMessages = history.map((message) =>

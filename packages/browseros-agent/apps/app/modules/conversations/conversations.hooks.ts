@@ -17,7 +17,7 @@ export interface ServerConversationSummary {
 export interface ServerConversation {
   id: string
   messages: UIMessage[]
-  targetType: 'browseros' | 'claude' | 'codex' | 'custom'
+  targetType: 'browseros' | 'claude' | 'codex' | 'custom' | 'paperclip'
   agentId?: string
 }
 

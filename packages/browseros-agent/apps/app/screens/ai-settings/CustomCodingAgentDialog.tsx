@@ -35,6 +35,7 @@ import {
   formatEnvLines,
   parseEnvLines,
 } from './custom-agent-form.helpers'
+import { PaperclipAgentDialog } from './PaperclipAgentDialog'
 import { PopularAcpAgentsDialog } from './PopularAcpAgentsDialog'
 
 const AGENT_DEFAULT = '__agent_default__'
@@ -48,7 +49,16 @@ export interface CustomCodingAgentDialogProps {
   onSaved?: (agentId: string) => void
 }
 
-export const CustomCodingAgentDialog: FC<CustomCodingAgentDialogProps> = ({
+export const CustomCodingAgentDialog: FC<CustomCodingAgentDialogProps> = (
+  props,
+) =>
+  props.agent?.type === 'paperclip' ? (
+    <PaperclipAgentDialog key={props.agent.id} {...props} />
+  ) : (
+    <LocalCustomCodingAgentDialog {...props} />
+  )
+
+const LocalCustomCodingAgentDialog: FC<CustomCodingAgentDialogProps> = ({
   open,
   onOpenChange,
   agent,

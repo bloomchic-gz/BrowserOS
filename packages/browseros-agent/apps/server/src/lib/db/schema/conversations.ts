@@ -16,7 +16,7 @@ export const conversations = sqliteTable(
     lastUserMessage: text('last_user_message'),
     origin: text('origin'),
     targetType: text('target_type', {
-      enum: ['browseros', 'claude', 'codex', 'custom'],
+      enum: ['browseros', 'claude', 'codex', 'custom', 'paperclip'],
     }).notNull(),
     agentId: text('agent_id'),
     lastMessagedAt: integer('last_messaged_at').notNull(),

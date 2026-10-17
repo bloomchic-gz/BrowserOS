@@ -1,4 +1,5 @@
 import type { AgentRoutes } from '@browseros/server'
+import type { PaperclipAgentConfig } from '@browseros/shared/schemas/agent'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { hc } from 'hono/client'
 import { Feature } from '@/lib/browseros/capabilities'
@@ -14,6 +15,7 @@ interface CreateAcpAgentInput {
   reasoningEffort?: string
   workingDirectory?: string
   customConfig?: CustomAcpAgentConfig
+  paperclipConfig?: PaperclipAgentConfig
 }
 
 interface UpdateAcpAgentInput {
@@ -24,6 +26,7 @@ interface UpdateAcpAgentInput {
     reasoningEffort?: string | null
     workingDirectory?: string | null
     customConfig?: CustomAcpAgentConfig
+    paperclipConfig?: PaperclipAgentConfig
   }
 }
 

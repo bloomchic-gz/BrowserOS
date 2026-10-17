@@ -48,6 +48,7 @@ const PreviousConversationSchema = z
 
 const ChatInputSchema = z.object({
   conversationId: z.string().uuid(),
+  clientMessageId: z.string().min(1).max(200).optional(),
   message: z.string().optional().default(''),
   contextWindowSize: z.number().optional(),
   browserContext: BrowserContextSchema.optional(),

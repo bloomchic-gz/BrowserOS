@@ -10,7 +10,12 @@ import { type BrowserOsDatabase, getDb } from '../db'
 import { type ConversationRow, conversations } from '../db/schema'
 import { logger } from '../logger'
 
-export type ConversationTargetType = 'browseros' | 'claude' | 'codex' | 'custom'
+export type ConversationTargetType =
+  | 'browseros'
+  | 'claude'
+  | 'codex'
+  | 'custom'
+  | 'paperclip'
 
 /** Row metadata without the message blob, for cheap history listing. */
 export interface ConversationSummary {

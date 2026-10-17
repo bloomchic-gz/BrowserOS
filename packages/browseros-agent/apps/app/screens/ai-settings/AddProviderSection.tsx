@@ -33,7 +33,7 @@ interface Entry extends AddProviderEntryMeta {
   featured?: boolean
 }
 
-const AGENT_TYPES = ['claude', 'codex'] as const
+const AGENT_TYPES = ['claude', 'codex', 'paperclip'] as const
 
 export const AddProviderSection: FC<AddProviderSectionProps> = ({
   onCreateAgent,

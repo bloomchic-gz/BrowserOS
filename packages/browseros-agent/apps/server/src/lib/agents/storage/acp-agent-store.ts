@@ -1,5 +1,9 @@
 import { randomUUID } from 'node:crypto'
-import { CustomAcpAgentConfigSchema } from '@browseros/shared/schemas/agent'
+import {
+  CustomAcpAgentConfigSchema,
+  type PaperclipAgentConfig,
+  PaperclipAgentConfigSchema,
+} from '@browseros/shared/schemas/agent'
 import { and, desc, eq } from 'drizzle-orm'
 import { type BrowserOsDatabase, getDb } from '../../db'
 import { type ProviderRow, providers } from '../../db/schema'
@@ -17,6 +21,7 @@ export interface CreateAcpAgentInput {
   reasoningEffort?: string
   workingDirectory?: string
   customConfig?: CustomAcpAgentConfig
+  paperclipConfig?: PaperclipAgentConfig
 }
 
 export interface UpdateAcpAgentInput {
@@ -25,6 +30,7 @@ export interface UpdateAcpAgentInput {
   reasoningEffort?: string | null
   workingDirectory?: string | null
   customConfig?: CustomAcpAgentConfig
+  paperclipConfig?: PaperclipAgentConfig
 }
 
 export interface AcpAgentStore {
@@ -88,9 +94,10 @@ export class DbAcpAgentStore implements AcpAgentStore {
         modelId: optionalText(input.modelId),
         reasoningEffort: optionalText(input.reasoningEffort),
         workingDirectory: optionalText(input.workingDirectory),
-        customConfig: input.customConfig
-          ? JSON.stringify(input.customConfig)
-          : null,
+        customConfig:
+          (input.paperclipConfig ?? input.customConfig)
+            ? JSON.stringify(input.paperclipConfig ?? input.customConfig)
+            : null,
         createdAt: now,
         updatedAt: now,
       }
@@ -136,9 +143,9 @@ export class DbAcpAgentStore implements AcpAgentStore {
             ? existing.workingDirectory
             : optionalText(input.workingDirectory ?? undefined),
         customConfig:
-          input.customConfig === undefined
+          (input.paperclipConfig ?? input.customConfig) === undefined
             ? existing.customConfig
-            : JSON.stringify(input.customConfig),
+            : JSON.stringify(input.paperclipConfig ?? input.customConfig),
         updatedAt: Date.now(),
       }
       this.db
@@ -188,7 +195,14 @@ function toAcpAgentDefinition(row: ProviderRow): AcpAgentDefinition {
     modelId: row.modelId ?? undefined,
     reasoningEffort: row.reasoningEffort ?? undefined,
     workingDirectory: row.workingDirectory ?? undefined,
-    customConfig: parseCustomConfig(row.customConfig, row.id),
+    customConfig:
+      row.type === 'custom'
+        ? parseCustomConfig(row.customConfig, row.id)
+        : undefined,
+    paperclipConfig:
+      row.type === 'paperclip' && row.customConfig
+        ? PaperclipAgentConfigSchema.parse(JSON.parse(row.customConfig))
+        : undefined,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   }

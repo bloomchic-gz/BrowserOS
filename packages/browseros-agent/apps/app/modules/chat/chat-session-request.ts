@@ -23,6 +23,7 @@ export interface BuildSidepanelPreparedSendMessagesRequestInput
    * that none is selected.
    */
   fallbackProvider: LlmProviderConfig | undefined
+  clientMessageId?: string
   message?: string
   attachments?: Array<{ mediaType: string; data: string }>
 }
@@ -60,6 +61,9 @@ export function buildSidepanelPreparedSendMessagesRequest({
         target: { type: target.agentType, agentId: target.agentId },
         conversationId: common.conversationId,
         message: message ?? '',
+        ...(common.clientMessageId
+          ? { clientMessageId: common.clientMessageId }
+          : {}),
         mode: common.mode,
         browserContext: common.browserContext,
         userSystemPrompt: common.userSystemPrompt,

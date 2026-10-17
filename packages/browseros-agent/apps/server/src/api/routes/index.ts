@@ -42,7 +42,7 @@ interface CreateApiRoutesDeps {
 }
 
 /** Composes the BrowserOS HTTP API from the existing route factories. */
-export function createApiRoutes(deps: CreateApiRoutesDeps) {
+export function createApiRoutes(deps: CreateApiRoutesDeps): Hono<Env> {
   const { agentRoutes, config, klavis, onShutdown, tokenManager } = deps
   const { browser, browserosId, browserSession, port, resourcesDir, version } =
     config

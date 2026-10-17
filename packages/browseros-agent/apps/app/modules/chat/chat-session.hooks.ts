@@ -459,6 +459,9 @@ export const useChatSession = (options?: ChatSessionOptions) => {
         )
         const commonRequest = {
           conversationId: conversationIdRef.current,
+          clientMessageId: messages.findLast(
+            (message) => message.role === 'user',
+          )?.id,
           mode: currentMode,
           browserContext: requestBrowserContext,
           userSystemPrompt,

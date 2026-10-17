@@ -19,6 +19,8 @@ export const AdapterIcon: FC<AdapterIconProps> = ({ adapter, className }) => {
 
 export function adapterLabel(adapter: AcpAgentType | 'unknown'): string {
   switch (adapter) {
+    case 'paperclip':
+      return 'Paperclip'
     case 'claude':
       return 'Claude Code'
     case 'codex':

@@ -87,6 +87,7 @@ export async function buildAcpAgentPolicy(
 function resolveFullAccessModeCandidates(
   agent: AcpAgentDefinition,
 ): readonly string[] {
+  if (agent.type === 'paperclip') return []
   if (agent.type === 'custom') return agent.customConfig?.fullAccessModes ?? []
   return DANGEROUS_ALLOW_MODE_CANDIDATES[agent.type]
 }
@@ -117,6 +118,7 @@ function buildSpawnEnvironment(
   agent: AcpAgentDefinition,
   instructions: string,
 ): Record<string, string> | undefined {
+  if (agent.type === 'paperclip') return undefined
   if (agent.type === 'custom') return agent.customConfig?.env
 
   if (agent.type !== 'codex') return undefined

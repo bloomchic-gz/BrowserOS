@@ -22,6 +22,7 @@ import {
 import { useAcpAgentProbe } from '@/modules/agents/acp-agent-probe.hooks'
 import type { AcpAgentType } from '@/modules/agents/acp-agent-types'
 import { useCreateAcpAgent } from '@/modules/agents/agents.hooks'
+import { PaperclipAgentDialog } from './PaperclipAgentDialog'
 
 const AGENT_DEFAULT = '__agent_default__'
 
@@ -33,7 +34,14 @@ export interface NewCodingAgentDialogProps {
   onSaved?: (agentId: string) => void
 }
 
-export const NewCodingAgentDialog: FC<NewCodingAgentDialogProps> = ({
+export const NewCodingAgentDialog: FC<NewCodingAgentDialogProps> = (props) =>
+  props.type === 'paperclip' ? (
+    <PaperclipAgentDialog {...props} />
+  ) : (
+    <LocalCodingAgentDialog {...props} />
+  )
+
+const LocalCodingAgentDialog: FC<NewCodingAgentDialogProps> = ({
   type,
   open,
   onOpenChange,

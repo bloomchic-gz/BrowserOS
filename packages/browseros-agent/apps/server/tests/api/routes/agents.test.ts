@@ -50,6 +50,62 @@ describe('ACP agent routes', () => {
     })
   })
 
+  it('stores Paperclip credentials but never includes them in public agent responses', async () => {
+    const store = new MemoryAcpAgentStore()
+    const routes = createAgentRoutes({ store })
+    const paperclipConfig = {
+      url: 'https://paperclip.example.com',
+      token: 'private-access',
+      refreshToken: 'private-refresh',
+      clientId: AGENT_ID,
+      remoteAgentId: AGENT_ID,
+    }
+    const response = await routes.request('/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Paperclip',
+        type: 'paperclip',
+        paperclipConfig,
+      }),
+    })
+    expect(response.status).toBe(201)
+    const created = await response.text()
+    expect(created).not.toContain('private-access')
+    expect(created).not.toContain('private-refresh')
+    expect((await routes.request('/')).status).toBe(200)
+    expect(await (await routes.request('/')).text()).not.toContain(
+      'private-access',
+    )
+    expect((await store.get(AGENT_ID))?.paperclipConfig?.token).toBe(
+      'private-access',
+    )
+  })
+
+  it('requires Paperclip configuration and rejects cleartext remote origins', async () => {
+    const routes = createAgentRoutes({ store: new MemoryAcpAgentStore() })
+    for (const paperclipConfig of [
+      undefined,
+      {
+        url: 'http://remote.example.com',
+        token: 'test',
+        clientId: AGENT_ID,
+        remoteAgentId: AGENT_ID,
+      },
+    ]) {
+      const response = await routes.request('/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'Paperclip',
+          type: 'paperclip',
+          paperclipConfig,
+        }),
+      })
+      expect(response.status).toBe(400)
+    }
+  })
+
   it('rejects legacy harness and custom ACP fields', async () => {
     const routes = createAgentRoutes({ store: new MemoryAcpAgentStore() })
     const response = await routes.request('/', {
@@ -167,6 +223,7 @@ class MemoryAcpAgentStore implements AcpAgentStore {
       reasoningEffort: input.reasoningEffort,
       workingDirectory: input.workingDirectory,
       customConfig: input.customConfig,
+      paperclipConfig: input.paperclipConfig,
       createdAt: 1,
       updatedAt: 1,
     }

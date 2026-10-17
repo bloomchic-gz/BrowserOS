@@ -28,6 +28,7 @@ import type { AcpAgentDefinition } from '../agent-types'
 import { deriveAcpSessionKey } from '../storage/acp-agent-store'
 import { type AcpAgentPolicy, buildAcpAgentPolicy } from './acp-agent-policy'
 import { ensureAcpWorkspace } from './browseros-instructions'
+import { PaperclipAgentRuntime } from './paperclip-agent-runtime'
 
 export interface AcpAgentRuntimeOptions {
   serverPort: number
@@ -81,6 +82,7 @@ export class AcpAgentPreparationError extends Error {
  * response and turn lock, so neither replies nor browser actions are duplicated.
  */
 export class AcpAgentRuntime {
+  private readonly paperclip: PaperclipAgentRuntime
   private readonly serverPort: number
   private readonly resourcesDir: string | null
   private readonly browserosDir: string
@@ -106,6 +108,10 @@ export class AcpAgentRuntime {
     this.browserosDir = options.browserosDir ?? getBrowserosDir()
     this.stateDir =
       options.stateDir ?? join(this.browserosDir, 'agents', 'acp-sessions')
+    this.paperclip = new PaperclipAgentRuntime(
+      this.serverPort,
+      join(this.browserosDir, 'agents', 'paperclip-sessions'),
+    )
     this.idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS
     this.createProvider = options.createProvider ?? createAcpxProvider
   }
@@ -118,6 +124,11 @@ export class AcpAgentRuntime {
       throw new AcpAgentSessionBusyError()
     }
     this.activeTurns.add(sessionKey)
+
+    if (input.agent.type === 'paperclip')
+      return releaseOnEnd(this.paperclip.stream(input), () =>
+        this.activeTurns.delete(sessionKey),
+      )
 
     let createdSession = false
     let streamStarted = false
@@ -248,9 +259,10 @@ export class AcpAgentRuntime {
     conversationId: string,
     options: { discardPersistentState?: boolean } = {},
   ): Promise<boolean> {
+    const remoteClosed = this.paperclip.close(agentId, conversationId)
     const sessionKey = deriveAcpSessionKey(agentId, conversationId)
     const session = this.sessions.get(sessionKey)
-    if (!session) return false
+    if (!session) return remoteClosed > 0
     this.sessions.delete(sessionKey)
     clearIdleTimer(session)
     await session.provider.close('close', options)
@@ -261,6 +273,7 @@ export class AcpAgentRuntime {
     agentId: string,
     options: { discardPersistentState?: boolean } = {},
   ): Promise<number> {
+    const remoteClosed = this.paperclip.close(agentId)
     const prefix = `acp:${agentId}:`
     const sessionKeys = [...this.sessions.keys()].filter((key) =>
       key.startsWith(prefix),
@@ -274,7 +287,7 @@ export class AcpAgentRuntime {
         await session.provider.close('agent-delete', options)
       }),
     )
-    return sessionKeys.length
+    return sessionKeys.length + remoteClosed
   }
 
   private async acquireSession(

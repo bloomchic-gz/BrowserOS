@@ -1,6 +1,7 @@
 import type {
   AcpAgentType,
   CustomAcpAgentConfig,
+  PaperclipAgentConfig,
 } from '@browseros/shared/schemas/agent'
 
 export type { AcpAgentType, CustomAcpAgentConfig }
@@ -14,6 +15,10 @@ export interface AcpAgent {
   workingDirectory?: string
   /** Present only for `type: 'custom'` agents. */
   customConfig?: CustomAcpAgentConfig
+  paperclipConfig?: Pick<
+    PaperclipAgentConfig,
+    'url' | 'remoteAgentId' | 'clientId'
+  >
   createdAt: number
   updatedAt: number
 }
