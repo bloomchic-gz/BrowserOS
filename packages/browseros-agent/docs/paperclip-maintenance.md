@@ -31,7 +31,7 @@ Runner 和 BrowserOS 都主动连接 Paperclip；远程 Agent 的浏览器请求
 
 能参与任务和能实际控制浏览器需要分别验证；缺少 Run 专属工具通道的 Agent 应补齐适配，不能把纯文本输出算作浏览器执行成功。ACP 是当前路径，其他执行方式满足相同任务、工具、暂停、取消与结果契约也可接入。
 
-当前服务端仍仅放行 Codex/Claude，真实 BrowserOS live 仅验证 Codex。Kiro 已有 ACP 路径但尚未通过 BrowserOS 准入与联调；Hermes/Grok 已有 Runner adapter，浏览器工具链路仍需适配验证。上述扩展目标不代表这些能力已经实现。完整能力契约与覆盖状态维护在 Paperclip 的 `doc/integrations/browseros-contracts.md`（R16–R17）。
+当前服务端通过统一能力入口注册 Codex、Claude、Kiro、Hermes、Grok 的 ACP 路径；界面使用远端模型/effort 能力，支持手工模型 ID，并显示不可用 Agent 的原因。注册不等于当前机器已登录或已通过真实验收；各 Agent 的结果、外部额度限制和缺口见 Paperclip 的 `tests/browseros-machine-acceptance/implementation-2026-10-18.md`。完整能力契约与覆盖状态维护在 Paperclip 的 `doc/integrations/browseros-contracts.md`（R16–R17）。
 
 ## 核心和可替换接入
 
@@ -40,7 +40,7 @@ Runner 和 BrowserOS 都主动连接 Paperclip；远程 Agent 的浏览器请求
 | 边界 | 实现入口 | 升级必须保持 |
 | --- | --- | --- |
 | 核心运行状态 | `apps/server/src/lib/agents/acp/paperclip-agent-runtime.ts` | 每个对话的后台 worker、同步、暂停、恢复；关闭聊天流不关闭后台 |
-| 远端协议与本地绑定 | `apps/server/src/lib/agents/acp/paperclip-client.ts` | requestId 复用、原子保存、OAuth 刷新、连接身份不能静默改变 |
+| 远端协议与本地绑定 | `apps/server/src/lib/agents/acp/paperclip-client.ts`、`paperclip-binding.ts` | requestId 复用、原子保存、OAuth 刷新、连接身份不能静默改变 |
 | Agent 类型和配置 | `packages/shared/src/schemas/agent.ts`、server `agent-types.ts`、`storage/acp-agent-store.ts`、`api/routes/agents.ts` | 凭据只在后台，模型/effort 仍可编辑，刷新和删除回调不丢失 |
 | ACP 分派 | server `acp-agent-runtime.ts`、`acp-agent-policy.ts`、`api/services/chat-service.ts`、`api/types.ts` | Paperclip 分支不改变普通本地 ACP；运行租约要正确释放 |
 | 服务启动 | server `api/routes/index.ts` | 后台恢复、可信来源检查、本机工具租约、Agent 删除和变更通知 |
@@ -53,9 +53,9 @@ Runner 和 BrowserOS 都主动连接 Paperclip；远程 Agent 的浏览器请求
 
 ## 数据和升级约束
 
-绑定 JSON 包含连接 identity、Task ID、待发消息 requestId/正文/设置、启用/删除状态与同步信息。重构时必须兼容旧数据，不能解析失败就创建新 Task。当前格式没有显式版本，应在迁移阶段增加版本并验证原子升级。
+绑定 JSON 包含连接 identity、Task ID、待发消息 requestId/正文/设置、启用/删除状态与同步信息。重构时必须兼容旧数据，不能解析失败就创建新 Task。现在由 `paperclip-binding.ts` 独立处理读写与校验，保存显式 `version: 1`。旧格式读取后保留原 Task/requestId 并原子升级；损坏、未来版本或连接身份不一致时拒绝继续，原文件保留。完整 BindingStore/ConversationSink 接口仍是后续重构项。
 
-Paperclip 当前通过 `issue_create_idempotency_keys` 的 `browseros:%` 记录识别绑定，但该表有上游 7 天清理窗口。这个生命周期冲突需要在 Paperclip 优先修复为持久绑定；BrowserOS 不应通过重新建 Task 掩盖问题。旧记录丢失时应进入可证明身份的恢复流程。
+Paperclip 已通过 0356 迁移将现存旧身份回填到 `browseros_task_bindings`；新 Task 与绑定在同一事务保存，上游 7 天幂等清理不再使绑定失效。迁移前已经丢失的身份无法自动证明来源，不能通过重新建 Task 或按标题认领掩盖问题。升级应停止旧控制端写入，避免混跑只认识旧表的代码。
 
 ## 验收入口
 
@@ -66,12 +66,13 @@ node tests/browseros-machine-acceptance/run.mjs --check /absolute/private/config
 node tests/browseros-machine-acceptance/run.mjs --run /absolute/private/config.json /absolute/private/evidence
 ```
 
-配置中的 BrowserOS Agent 必须指向同一独立 Paperclip 测试实例和 Machine Codex Agent；不要把真实日常账号/生产实例当测试夹具。每次运行新建 conversation/Task，并使用独立报告目录，不依赖旧 Task ID。测试结束暂停本次连接并保留证据和测试页，便于审查；不修改全局 Agent 设置，不停止共享服务。
+配置中的 BrowserOS Agent 必须指向同一独立 Paperclip 测试实例和 Machine 上的被测 Agent；不要把真实日常账号/生产实例当测试夹具。每次运行新建 conversation/Task，并使用独立报告目录，不依赖旧 Task ID。测试结束暂停本次连接并保留证据和测试页，便于审查；不修改全局 Agent 设置，不停止共享服务。
 
 自动 live 覆盖建 Task、团队继续、真实 ACP 浏览器工具、暂停恢复、本地继续、Stop、普通 Task 隔离和双端结果。UI 模型选择、服务重启、断网副作用和数据库迁移另有验收责任，不能由这个 live 成功替代。
 
 BrowserOS 现有回归入口包括：
 
+- `apps/server/tests/lib/agents/acp/paperclip-binding.test.ts`
 - `apps/server/tests/lib/agents/acp/paperclip-agent-runtime.test.ts`
 - `apps/server/tests/lib/agents/acp/acp-agent-runtime.test.ts`
 - `apps/server/tests/api/services/mcp/browser-mcp-module.test.ts`
