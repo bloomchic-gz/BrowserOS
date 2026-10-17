@@ -1,30 +1,30 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, readdir, readFile } from 'node:fs/promises'
-import { join } from 'node:path'
 import type { PaperclipAgentConfig } from '@browseros/shared/schemas/agent'
-import { createUIMessageStream, type UIMessage, type UIMessageChunk } from 'ai'
+import { createUIMessageStream, type UIMessageChunk } from 'ai'
 import { z } from 'zod'
 import type { BrowserToolLease } from '../../../api/services/mcp/browser-mcp-module'
-import {
-  type ConversationStore,
-  DbConversationStore,
-} from '../../conversations/conversation-store'
 import type { AcpAgentDefinition } from '../agent-types'
 import { DbAcpAgentStore } from '../storage/acp-agent-store'
 import type { AcpAgentStreamInput } from './acp-agent-runtime'
+import { type BindingStore, FileBindingStore } from './paperclip-binding-store'
 import {
   type Binding,
   type CommentSchema,
   callLocalBrowser,
   freshPaperclipConfig,
-  loadBinding,
   MessagesSchema,
   PollSchema,
   paperclipRequest,
-  parseBinding,
   type SentMessage,
   SnapshotSchema,
 } from './paperclip-client'
+import {
+  type ConversationSink,
+  type PaperclipMessage,
+  projectPaperclipMessages,
+  type RunOutput,
+} from './paperclip-conversation'
+import { DbConversationSink } from './paperclip-conversation-sink'
 
 export { freshPaperclipConfig, paperclipRequest } from './paperclip-client'
 
@@ -38,8 +38,8 @@ type PersistentBinding = Binding &
     enabled: boolean
     deleted?: boolean
     localSettings?: string
-    transcript?: UIMessage[]
-    outputs?: Record<string, { offset: number; text: string; status: string }>
+    transcript?: PaperclipMessage[]
+    outputs?: Record<string, RunOutput>
   }
 type Worker = {
   binding: PersistentBinding
@@ -62,7 +62,8 @@ export interface PaperclipRuntimeDeps {
     runId: string,
     signal: AbortSignal,
   ) => BrowserToolLease
-  store?: Pick<ConversationStore, 'get' | 'save'>
+  bindingStore?: BindingStore
+  conversationSink?: ConversationSink
   getAgent?: (id: string) => Promise<AcpAgentDefinition | null>
 }
 const pause = (signal: AbortSignal, ms = 1500) =>
@@ -83,13 +84,15 @@ export class PaperclipAgentRuntime {
   private restoration?: Promise<void>
   private workers = new Map<string, Worker>()
   private active = new Map<string, AbortController>()
-  private store: Pick<ConversationStore, 'get' | 'save'>
+  private readonly bindings: BindingStore
+  private readonly conversations: ConversationSink
   constructor(
     private serverPort: number,
-    private stateDir: string,
+    stateDir: string,
     private deps?: PaperclipRuntimeDeps,
   ) {
-    this.store = deps?.store ?? new DbConversationStore()
+    this.bindings = deps?.bindingStore ?? new FileBindingStore(stateDir)
+    this.conversations = deps?.conversationSink ?? new DbConversationSink()
   }
   private getAgent(id: string) {
     return this.deps?.getAgent?.(id) ?? new DbAcpAgentStore().get(id)
@@ -99,13 +102,9 @@ export class PaperclipAgentRuntime {
     return this.restoration
   }
   private async restoreSaved() {
-    await mkdir(this.stateDir, { recursive: true, mode: 0o700 })
-    for (const name of await readdir(this.stateDir)) {
-      if (!name.endsWith('.json')) continue
+    for await (const saved of this.bindings.list()) {
       try {
-        const binding = parseBinding(
-          JSON.parse(await readFile(join(this.stateDir, name), 'utf8')),
-        ) as PersistentBinding
+        const binding = saved as PersistentBinding
         if (
           !binding.agentId ||
           !binding.taskId ||
@@ -121,8 +120,7 @@ export class PaperclipAgentRuntime {
           messages: [],
           browserToolLeaseToken: '',
         }
-        const loaded = await loadBinding(
-          this.stateDir,
+        const loaded = await this.bindings.open(
           `${agent.id}:${binding.conversationId}`,
           input,
           agent.paperclipConfig,
@@ -340,57 +338,20 @@ export class PaperclipAgentRuntime {
         output.text = run.resultJson?.summary ?? `Paperclip run ${run.status}.`
       b.outputs[run.id] = output
     }
-    const messages: UIMessage[] = comments
-      .filter((c) => !c.deletedAt)
-      .map((c) => {
-        const local = Object.entries(b.messages ?? {}).find(
-          ([, sent]) => sent.requestId === c.clientRequestId,
-        )
-        return {
-          id: local?.[0] ?? `paperclip-comment-${c.id}`,
-          role:
-            c.authorAgentId || c.derivedAuthorAgentId ? 'assistant' : 'user',
-          parts: [
-            {
-              type: 'text',
-              text:
-                c.body
-                  .match(/<USER_QUERY>\s*([\s\S]*?)<\/USER_QUERY>/)?.[1]
-                  ?.trim() ?? c.body,
-            },
-          ],
-          metadata: {
-            paperclipCommentId: c.id,
-            authorUserId: c.authorUserId,
-            authorAgentId: c.authorAgentId ?? c.derivedAuthorAgentId,
-          },
-        }
-      })
-    for (const [runId, output] of Object.entries(b.outputs)) {
-      if (
-        !output.text ||
-        comments.some(
-          (c) =>
-            !c.deletedAt &&
-            (c.createdByRunId === runId || c.derivedCreatedByRunId === runId) &&
-            (c.authorAgentId || c.derivedAuthorAgentId),
-        )
-      )
-        continue
-      messages.push({
-        id: `paperclip-run-${runId}`,
-        role: 'assistant',
-        parts: [{ type: 'text', text: output.text }],
-      })
-    }
+    const messages = projectPaperclipMessages(
+      comments,
+      b.messages ?? {},
+      b.outputs,
+    )
     if (JSON.stringify(messages) !== JSON.stringify(b.transcript)) {
-      b.transcript = messages
-      await this.store.save({
-        id: b.conversationId,
+      // A failed sink write must be retried on the next reconciliation. Only
+      // acknowledge the snapshot after durable conversation storage succeeds.
+      await this.conversations.replace({
+        conversationId: b.conversationId,
         messages,
-        targetType: 'paperclip',
         agentId: b.agentId,
       })
+      b.transcript = messages
     }
     await worker.save(b)
   }
@@ -523,7 +484,7 @@ export class PaperclipAgentRuntime {
     const body = latest.parts
       .flatMap((p) => (p.type === 'text' ? [p.text] : []))
       .join('\n')
-    const loaded = await loadBinding(this.stateDir, key, input, config, body)
+    const loaded = await this.bindings.open(key, input, config, body)
     const existing = this.workers.get(input.conversationId)
     if (existing && existing.binding.agentId !== input.agent.id)
       throw new Error(

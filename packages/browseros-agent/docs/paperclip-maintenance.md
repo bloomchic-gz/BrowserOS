@@ -49,11 +49,24 @@ Runner 和 BrowserOS 都主动连接 Paperclip；远程 Agent 的浏览器请求
 | UI 映射 | app chat hooks、`paperclip-connection.hooks.ts`、`PaperclipConnectionBar.tsx`、`ChatLayout.tsx`、`NewTabChat.tsx` | 两入口连接状态一致，暂停与 Stop 含义不同，历史消息不回声重发 |
 | 配置界面 | app Agent hooks/menu/types、`PaperclipAgentDialog.tsx`、provider dialogs | URL/OAuth/Agent 选择、Task 模型覆盖，不泄露 token |
 
-下一步可以让核心依赖 BindingStore、ConversationSink、AgentConfigProvider、BrowserToolAccess 等窄接口；这些是拟议边界，不是今天已经存在的插件 API。先保留现有运行行为，再逐个移动适配代码，不进行一次性 UI/协议/存储重写。
+已将存储和消息写入收敛为两个窄接口，保持 JSON v1、Task/requestId、消息 ID 和现有 UI 行为：
+
+- `paperclip-binding-store.ts`：`BindingStore` 提供 list/open，`FileBindingStore` 封装现有文件目录、身份校验与原子读写。
+- `paperclip-conversation.ts`：`ConversationSink` 接收完整消息快照；纯函数投影处理作者、编辑删除、本机消息 ID 与 Run 输出替换。
+- `paperclip-conversation-sink.ts`：`DbConversationSink` 负责 UIMessage/上游 ConversationStore 格式适配。只有落库成功，Runtime 才更新同步确认状态；失败由后续同步补写。
+
+```mermaid
+flowchart LR
+  P["Paperclip Task / 评论 / Run"] --> R["Runtime<br/>连接、暂停、恢复、同步"]
+  R --> B["BindingStore"] --> F["FileBindingStore<br/>现有 JSON v1"]
+  R --> M["消息投影<br/>稳定 ID、编辑、删除"] --> S["ConversationSink"] --> D["DbConversationSink<br/>现有会话数据库 / UIMessage"]
+```
+
+这是仓库内接口，不是稳定公开插件 API。后续再提取 AgentConfigProvider、BrowserToolAccess；前台聊天流仍使用现有 AI SDK，协议和 UI 不在本次一起重写。
 
 ## 数据和升级约束
 
-绑定 JSON 包含连接 identity、Task ID、待发消息 requestId/正文/设置、启用/删除状态与同步信息。重构时必须兼容旧数据，不能解析失败就创建新 Task。现在由 `paperclip-binding.ts` 独立处理读写与校验，保存显式 `version: 1`。旧格式读取后保留原 Task/requestId 并原子升级；损坏、未来版本或连接身份不一致时拒绝继续，原文件保留。完整 BindingStore/ConversationSink 接口仍是后续重构项。
+绑定 JSON 包含连接 identity、Task ID、待发消息 requestId/正文/设置、启用/删除状态与同步信息。重构时必须兼容旧数据，不能解析失败就创建新 Task。现在由 `paperclip-binding.ts` 独立处理读写与校验，保存显式 `version: 1`。旧格式读取后保留原 Task/requestId 并原子升级；损坏、未来版本或连接身份不一致时拒绝继续，原文件保留。目录枚举与打开现由 FileBindingStore 适配，Runtime 通过接口使用；没有引入数据迁移或协议版本变更。
 
 Paperclip 已通过 0356 迁移将现存旧身份回填到 `browseros_task_bindings`；新 Task 与绑定在同一事务保存，上游 7 天幂等清理不再使绑定失效。迁移前已经丢失的身份无法自动证明来源，不能通过重新建 Task 或按标题认领掩盖问题。升级应停止旧控制端写入，避免混跑只认识旧表的代码。
 
@@ -68,11 +81,12 @@ node tests/browseros-machine-acceptance/run.mjs --run /absolute/private/config.j
 
 配置中的 BrowserOS Agent 必须指向同一独立 Paperclip 测试实例和 Machine 上的被测 Agent；不要把真实日常账号/生产实例当测试夹具。每次运行新建 conversation/Task，并使用独立报告目录，不依赖旧 Task ID。测试结束暂停本次连接并保留证据和测试页，便于审查；不修改全局 Agent 设置，不停止共享服务。
 
-自动 live 覆盖建 Task、团队继续、真实 ACP 浏览器工具、暂停恢复、本地继续、Stop、普通 Task 隔离和双端结果。UI 模型选择、服务重启、断网副作用和数据库迁移另有验收责任，不能由这个 live 成功替代。
+自动 live 覆盖建 Task、团队继续、真实 ACP 浏览器工具、暂停恢复、本地继续、Stop、普通 Task 隔离和双端结果。UI 模型选择和数据库迁移另有验收责任，不能由这个 live 成功替代。断网、poll/result/ack 丢失、后台与工具转发进程 SIGKILL、暂停后重启已有 `tests/browseros-machine-acceptance/faults/run.mjs` 独立夹具，可指定 `--cdp` 在专用页面计数。完整 Paperclip 服务/数据库与整个浏览器应用硬重启仍未覆盖。具体命令、首次失败和最终证据见 Paperclip `tests/browseros-machine-acceptance/faults/README.md` 与同目录验证记录。
 
 BrowserOS 现有回归入口包括：
 
 - `apps/server/tests/lib/agents/acp/paperclip-binding.test.ts`
+- `apps/server/tests/lib/agents/acp/paperclip-conversation.test.ts`
 - `apps/server/tests/lib/agents/acp/paperclip-agent-runtime.test.ts`
 - `apps/server/tests/lib/agents/acp/acp-agent-runtime.test.ts`
 - `apps/server/tests/api/services/mcp/browser-mcp-module.test.ts`

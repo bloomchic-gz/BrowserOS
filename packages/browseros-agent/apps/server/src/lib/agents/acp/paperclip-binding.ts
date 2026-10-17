@@ -3,7 +3,6 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { PaperclipAgentConfig } from '@browseros/shared/schemas/agent'
 import { z } from 'zod'
-import type { AcpAgentStreamInput } from './acp-agent-runtime'
 
 type Json = Record<string, unknown>
 export type SentMessage = {
@@ -62,7 +61,7 @@ export function parseBinding(value: unknown): Binding {
 export async function loadBinding(
   stateDir: string,
   key: string,
-  input: Pick<AcpAgentStreamInput, 'conversationId'>,
+  input: { conversationId: string },
   config: Pick<PaperclipAgentConfig, 'url' | 'clientId' | 'remoteAgentId'>,
   title: string,
 ) {

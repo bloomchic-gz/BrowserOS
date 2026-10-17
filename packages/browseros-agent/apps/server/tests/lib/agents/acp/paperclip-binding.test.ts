@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { loadBinding } from '../../../../src/lib/agents/acp/paperclip-binding'
+import { FileBindingStore } from '../../../../src/lib/agents/acp/paperclip-binding-store'
 
 const config = {
   url: 'https://paperclip.test',
@@ -44,6 +45,30 @@ describe('Paperclip binding storage compatibility', () => {
       expect(
         (await loadBinding(dir, key, input, config, 'again')).binding,
       ).toEqual(loaded.binding)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+  it('lists only readable bindings and preserves invalid files for recovery', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'browseros-binding-'))
+    try {
+      const store = new FileBindingStore(dir)
+      const opened = await store.open(key, input, config, 'first')
+      opened.binding.taskId = 'kept-task'
+      await opened.save(opened.binding)
+      await writeFile(
+        join(dir, 'future.json'),
+        JSON.stringify({ ...legacy, version: 99 }),
+      )
+      await writeFile(join(dir, 'corrupt.json'), '{broken')
+      await writeFile(join(dir, 'interrupted.tmp'), '{partial')
+      const bindings = []
+      for await (const binding of store.list()) bindings.push(binding)
+      expect(bindings).toEqual([opened.binding])
+      expect(await readFile(join(dir, 'corrupt.json'), 'utf8')).toBe('{broken')
+      expect(
+        (await store.open(key, input, config, 'again')).binding.taskId,
+      ).toBe('kept-task')
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

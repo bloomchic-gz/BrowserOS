@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AcpAgentStreamInput } from '../../../../src/lib/agents/acp/acp-agent-runtime'
 import { PaperclipAgentRuntime } from '../../../../src/lib/agents/acp/paperclip-agent-runtime'
+import { DbConversationSink } from '../../../../src/lib/agents/acp/paperclip-conversation-sink'
 import { BROWSEROS_TOOL_LEASE_HEADER } from '../../../../src/lib/browser-tool-lease'
 
 setDefaultTimeout(30000)
@@ -142,6 +143,8 @@ async function fixture(outcome?: 'rejected' | 'unknown') {
       },
     ],
   }
+  const saved: unknown[] = []
+  let failures = 0
   const runtime = () => {
     const instance = new PaperclipAgentRuntime(mcp.port ?? 0, dir, {
       createToolLease: () => ({
@@ -149,15 +152,16 @@ async function fixture(outcome?: 'rejected' | 'unknown') {
         revoke() {},
         updateBrowserContext() {},
       }),
-      store: {
-        get: async () => null,
-        save: async (value) => ({
-          ...value,
-          createdAt: 0,
-          updatedAt: 0,
-          lastMessagedAt: 0,
-        }),
-      },
+      conversationSink: new DbConversationSink({
+        save: async (value) => {
+          if (failures > 0) {
+            failures--
+            throw new Error('disk unavailable')
+          }
+          saved.push(value)
+          return { ...value, createdAt: 0, updatedAt: 0, lastMessagedAt: 0 }
+        },
+      }),
       getAgent: async () => input.agent,
     })
     cleanup.push(() => instance.shutdown())
@@ -171,6 +175,10 @@ async function fixture(outcome?: 'rejected' | 'unknown') {
   }
   return {
     input,
+    saved,
+    failNextSave: () => {
+      failures++
+    },
     runtime,
     read,
     sent,
@@ -232,6 +240,21 @@ describe('Paperclip native conversation runtime', () => {
     const deleted = f.runtime()
     await deleted.restore()
     expect(deleted.state(f.input.conversationId)).toBeNull()
+  })
+  it('retries a failed conversation write before acknowledging synchronized messages', async () => {
+    const f = await fixture()
+    const runtime = f.runtime()
+    for await (const _ of runtime.stream(f.input)) {
+    }
+    f.failNextSave()
+    f.comments.push({ id: 'disk-retry', body: 'Must reach durable history' })
+    await f.until(() => JSON.stringify(f.saved).includes('disk-retry'))
+    expect(
+      runtime
+        .state(f.input.conversationId)
+        ?.messages.filter((m) => m.id === 'paperclip-comment-disk-retry'),
+    ).toHaveLength(1)
+    expect(f.sent).toHaveLength(1)
   })
   it('persists task and mutation identity across restart and repeated delivery', async () => {
     const f = await fixture()
