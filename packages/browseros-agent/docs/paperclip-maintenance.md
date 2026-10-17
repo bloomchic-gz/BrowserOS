@@ -8,6 +8,8 @@
 
 解决任务与执行机器分离、远程 Agent 无法直接操作本机浏览器、多人协作上下文难接续的问题，同时降低长期跟随上游的维护成本。
 
+**扩展 Agent 也是核心目标**：Codex、Claude、Kiro、Hermes、Grok，以及以后引入的其他 Agent，都应纳入 BrowserOS 的接入范围。按实际能力设计适配，不能把现有品牌白名单当作长期产品边界。目标是共用任务、远程执行和浏览器控制链路；各 Agent 的当前支持状态与验证证据单独标注。
+
 ```mermaid
 flowchart LR
   R["Machine Runner<br/>在指定机器上运行 Agent"]
@@ -22,6 +24,14 @@ Runner 和 BrowserOS 都主动连接 Paperclip；远程 Agent 的浏览器请求
 维护上，核心业务语义和持久数据应长期保留，上游接入代码可以替换。
 
 基线：BrowserOS `efa8edeb4`，Paperclip `08e3bda0d`。规范需求、协议和阶段计划以配套 Paperclip 仓库的 `doc/integrations/browseros-contracts.md`、`doc/integrations/browseros-maintenance.md`、`doc/plans/2026-10-18-browseros-machine-maintenance.md` 为准，避免在两仓复制两份完整协议。这里维护 BrowserOS 自身的接入清单。
+
+## 多 Agent 接入边界
+
+长期按能力接入所有 Agent，不在 BrowserOS 固化 Codex/Claude 品牌名单。Paperclip 负责统一能力发现和服务端准入，Runner 负责执行机探测与 provider 适配，BrowserOS 共用绑定、同步和工具执行链路。模型与思考强度按远端声明展示，不支持的选项明确说明。
+
+能参与任务和能实际控制浏览器需要分别验证；缺少 Run 专属工具通道的 Agent 应补齐适配，不能把纯文本输出算作浏览器执行成功。ACP 是当前路径，其他执行方式满足相同任务、工具、暂停、取消与结果契约也可接入。
+
+当前服务端仍仅放行 Codex/Claude，真实 BrowserOS live 仅验证 Codex。Kiro 已有 ACP 路径但尚未通过 BrowserOS 准入与联调；Hermes/Grok 已有 Runner adapter，浏览器工具链路仍需适配验证。上述扩展目标不代表这些能力已经实现。完整能力契约与覆盖状态维护在 Paperclip 的 `doc/integrations/browseros-contracts.md`（R16–R17）。
 
 ## 核心和可替换接入
 
