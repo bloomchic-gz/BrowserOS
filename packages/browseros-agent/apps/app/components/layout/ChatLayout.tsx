@@ -1,5 +1,6 @@
 import type { FC } from 'react'
 import { Outlet } from 'react-router'
+import { PaperclipConnectionBar } from '@/components/chat/PaperclipConnectionBar'
 import {
   ChatSessionProvider,
   useChatSessionContext,
@@ -8,6 +9,7 @@ import { ChatHeader } from '@/screens/sidepanel/index/ChatHeader'
 
 const ChatLayoutContent: FC = () => {
   const {
+    conversationId,
     providers,
     selectedProvider,
     handleSelectProvider,
@@ -37,6 +39,9 @@ const ChatLayoutContent: FC = () => {
         onNewConversation={resetConversation}
         hasMessages={messages.length > 0}
       />
+      {selectedProvider?.brandKey === 'paperclip' && (
+        <PaperclipConnectionBar conversationId={conversationId} />
+      )}
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         <Outlet />
       </div>

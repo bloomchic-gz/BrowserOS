@@ -31,7 +31,10 @@ const ImportConversationSchema = z.object({
 })
 
 export function createConversationRoutes(
-  options: { store?: ConversationRouteStore } = {},
+  options: {
+    store?: ConversationRouteStore
+    beforeDelete?: (id: string) => Promise<void>
+  } = {},
 ) {
   const store = options.store ?? new DbConversationStore()
 
@@ -72,6 +75,7 @@ export function createConversationRoutes(
       '/:conversationId',
       zValidator('param', ConversationIdParamSchema),
       async (c) => {
+        await options.beforeDelete?.(c.req.valid('param').conversationId)
         const deleted = await store.delete(c.req.valid('param').conversationId)
         if (!deleted) return c.json({ error: 'Unknown conversation' }, 404)
         return c.json({ success: true })

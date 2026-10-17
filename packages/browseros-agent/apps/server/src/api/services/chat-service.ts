@@ -520,7 +520,10 @@ export class ChatService {
     const runDeleted = await this.conversationRuns.delete(conversationId)
     let acpDeleted = false
     const acpAgentId = this.acpConversationAgents.get(conversationId)
-    if (acpAgentId) {
+    if (
+      acpAgentId &&
+      (await this.getAcpAgentStore().get(acpAgentId))?.type !== 'paperclip'
+    ) {
       await this.getAcpRuntime().close(acpAgentId, conversationId, {
         discardPersistentState: true,
       })
@@ -585,7 +588,9 @@ export class ChatService {
       : userContent
     const historyKey = `${agent.id}:${request.conversationId}`
     const history: UIMessage[] =
-      this.acpMessages.get(historyKey) ??
+      (agent.type === 'paperclip'
+        ? undefined
+        : this.acpMessages.get(historyKey)) ??
       (await this.loadAcpDisplayHistory(agent.id, request))
     const priorHistoryLength = history.length
     const messageId = request.clientMessageId ?? crypto.randomUUID()
@@ -630,6 +635,11 @@ export class ChatService {
       browserContext,
       abortSignal,
       onFinish: async ({ messages }) => {
+        if (agent.type === 'paperclip') {
+          updateMessages(messages)
+          this.acpMessages.delete(historyKey)
+          return
+        }
         const existingIds = new Set(history.map((message) => message.id))
         history.push(
           ...messages.filter((message) => !existingIds.has(message.id)),

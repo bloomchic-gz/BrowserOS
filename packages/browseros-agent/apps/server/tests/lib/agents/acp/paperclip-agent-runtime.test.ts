@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'bun:test'
+import { afterEach, describe, expect, it, setDefaultTimeout } from 'bun:test'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -6,14 +6,17 @@ import type { AcpAgentStreamInput } from '../../../../src/lib/agents/acp/acp-age
 import { PaperclipAgentRuntime } from '../../../../src/lib/agents/acp/paperclip-agent-runtime'
 import { BROWSEROS_TOOL_LEASE_HEADER } from '../../../../src/lib/browser-tool-lease'
 
+setDefaultTimeout(30000)
 const cleanup: Array<() => unknown> = []
 afterEach(async () => {
-  for (const stop of cleanup.splice(0)) await stop()
+  for (const stop of cleanup.splice(0).reverse()) await stop()
 })
 async function fixture(outcome?: 'rejected' | 'unknown') {
   const dir = await mkdtemp(join(tmpdir(), 'paperclip-runtime-'))
   cleanup.push(() => rm(dir, { recursive: true, force: true }))
   const tasks = new Map<string, { run: string | null; receipts: Set<string> }>()
+  const comments: Array<{ id: string; body: string; authorAgentId?: string }> =
+    []
   const sent: Array<{ requestId: string; body: string }> = []
   const tools: Array<{ url: string; lease: string | null }> = []
   let opens = 0,
@@ -56,6 +59,7 @@ async function fixture(outcome?: 'rejected' | 'unknown') {
           ? [
               {
                 id: crypto.randomUUID(),
+                runId: 'remote-run',
                 request: {
                   jsonrpc: '2.0',
                   id: 1,
@@ -68,7 +72,11 @@ async function fixture(outcome?: 'rejected' | 'unknown') {
         toolPending = false
         return Response.json({ calls })
       }
-      if (path.endsWith('/respond') || path.endsWith('/detach'))
+      if (
+        path.endsWith('/respond') ||
+        path.endsWith('/detach') ||
+        path.endsWith('/check')
+      )
         return Response.json({ ok: true })
       const task = tasks.get(path.split('/')[2])
       if (!task) return new Response('', { status: 404 })
@@ -91,6 +99,8 @@ async function fixture(outcome?: 'rejected' | 'unknown') {
         running = false
         return Response.json({ ok: true })
       }
+      if (path.endsWith('/messages'))
+        return Response.json({ comments, next: null })
       if (path.endsWith('/snapshot'))
         return Response.json({
           comments: [],
@@ -132,10 +142,31 @@ async function fixture(outcome?: 'rejected' | 'unknown') {
       },
     ],
   }
-  const runtime = () => new PaperclipAgentRuntime(mcp.port ?? 0, dir)
+  const runtime = () => {
+    const instance = new PaperclipAgentRuntime(mcp.port ?? 0, dir, {
+      createToolLease: () => ({
+        token: 'local-lease',
+        revoke() {},
+        updateBrowserContext() {},
+      }),
+      store: {
+        get: async () => null,
+        save: async (value) => ({
+          ...value,
+          createdAt: 0,
+          updatedAt: 0,
+          lastMessagedAt: 0,
+        }),
+      },
+      getAgent: async () => input.agent,
+    })
+    cleanup.push(() => instance.shutdown())
+    return instance
+  }
   const read = async (instance: PaperclipAgentRuntime, value = input) => {
     const chunks = []
     for await (const chunk of instance.stream(value)) chunks.push(chunk)
+    await instance.shutdown()
     return chunks
   }
   return {
@@ -149,10 +180,59 @@ async function fixture(outcome?: 'rejected' | 'unknown') {
       running = true
     },
     tasks,
+    comments,
+    async until(check: () => boolean) {
+      const deadline = Date.now() + 8000
+      while (!check() && Date.now() < deadline)
+        await new Promise((r) => setTimeout(r, 30))
+      expect(check()).toBe(true)
+    },
   }
 }
 
 describe('Paperclip native conversation runtime', () => {
+  it('keeps working after foreground completion, syncs team messages once, and restores paused connections', async () => {
+    const f = await fixture()
+    const runtime = f.runtime()
+    for await (const _ of runtime.stream(f.input)) {
+      /* Drain foreground only. */
+    }
+    expect(runtime.state(f.input.conversationId)?.status).toBe('online')
+    f.comments.push({ id: 'team-comment', body: 'Continue from teammate' })
+    await f.until(
+      () =>
+        runtime
+          .state(f.input.conversationId)
+          ?.messages.some((m) => m.id === 'paperclip-comment-team-comment') ??
+        false,
+    )
+    await runtime.control(f.input.conversationId, 'pause')
+    expect(runtime.state(f.input.conversationId)?.status).toBe('paused')
+    f.comments[0].body = 'Edited by teammate'
+    await f.until(() =>
+      JSON.stringify(runtime.state(f.input.conversationId)?.messages).includes(
+        'Edited by teammate',
+      ),
+    )
+    await runtime.shutdown()
+    const restored = f.runtime()
+    await restored.restore()
+    expect(restored.state(f.input.conversationId)?.enabled).toBe(false)
+    await restored.control(f.input.conversationId, 'resume')
+    await f.until(
+      () => restored.state(f.input.conversationId)?.status === 'online',
+    )
+    expect(
+      restored
+        .state(f.input.conversationId)
+        ?.messages.filter((m) => m.id === 'paperclip-comment-team-comment'),
+    ).toHaveLength(1)
+    expect(f.sent).toHaveLength(1)
+    await restored.forget(f.input.conversationId)
+    const deleted = f.runtime()
+    await deleted.restore()
+    expect(deleted.state(f.input.conversationId)).toBeNull()
+  })
   it('persists task and mutation identity across restart and repeated delivery', async () => {
     const f = await fixture()
     expect(
@@ -241,6 +321,13 @@ describe('Paperclip native conversation runtime', () => {
     expect(f.sent[3]).toMatchObject({
       settings: { modelId: null, reasoningEffort: null },
     })
+    f.input.messages.push({
+      id: 'unchanged-settings',
+      role: 'user',
+      parts: [{ type: 'text', text: 'Keep remotely edited Task settings' }],
+    })
+    await f.read(f.runtime())
+    expect(f.sent.at(-1)).not.toHaveProperty('settings')
   })
   it.each(['rejected', 'unknown'] as const)(
     'surfaces a %s receipt without waiting for a run',

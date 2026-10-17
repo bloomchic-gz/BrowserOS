@@ -5,9 +5,13 @@ import { join } from 'node:path'
 import type { BrowserSession } from '@browseros/browser-core/core/session'
 import { createBrowserOutputFileAccess } from '@browseros/browser-mcp/output-file'
 import { TOOL_LIMITS } from '@browseros/shared/constants/limits'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import type { ActiveConversationRun } from '../../../../src/api/services/conversation-runs'
 import { KlavisService } from '../../../../src/api/services/klavis/service'
 import { BrowserMcpModule } from '../../../../src/api/services/mcp/browser-mcp-module'
+import { MCP_INSTRUCTIONS } from '../../../../src/api/services/mcp/mcp-prompt'
+import { BROWSEROS_ACP_INSTRUCTIONS } from '../../../../src/lib/agents/acp/browseros-instructions'
 import { createReadTool } from '../../../../src/tools/filesystem/read'
 
 type RegisteredTool = {
@@ -69,6 +73,82 @@ function browserSession(): BrowserSession {
 }
 
 describe('BrowserMcpModule', () => {
+  it('sends canonical ACP instructions only to the bound Paperclip MCP client', async () => {
+    const { browserMcp: runtime } = moduleFixture()
+    const conversationId = crypto.randomUUID()
+    const controller = new AbortController()
+    const remoteRun = {
+      conversationId,
+      runId: 'remote-prompt-run',
+      signal: controller.signal,
+      panelsVisible: false,
+      tabGroup: undefined,
+      associateTabs: () => true,
+    }
+    for (const remote of [false, true]) {
+      const lease = runtime.createLease({
+        conversationId,
+        readOnly: true,
+        outputFileAccess: createBrowserOutputFileAccess(),
+        source: remote ? 'paperclip' : 'acp',
+        ...(remote ? { remoteRun } : {}),
+      })
+      const server = runtime.createMcpServer({ leaseToken: lease.token })
+      const client = new Client({ name: 'prompt-test', version: '1' })
+      const [clientTransport, serverTransport] =
+        InMemoryTransport.createLinkedPair()
+      try {
+        await server.connect(serverTransport)
+        await client.connect(clientTransport)
+        expect(client.getInstructions()).toBe(
+          remote
+            ? `${BROWSEROS_ACP_INSTRUCTIONS}\n${MCP_INSTRUCTIONS}`
+            : MCP_INSTRUCTIONS,
+        )
+      } finally {
+        await client.close()
+        await server.close()
+        lease.revoke()
+      }
+    }
+  })
+
+  it('pins a background call to its remote run and never falls back after cancellation', async () => {
+    const { browserMcp: runtime, runs } = moduleFixture()
+    const conversationId = crypto.randomUUID(),
+      controller = new AbortController()
+    const lease = runtime.createLease({
+      conversationId,
+      readOnly: true,
+      source: 'paperclip',
+      outputFileAccess: createBrowserOutputFileAccess(),
+      remoteRun: {
+        conversationId,
+        runId: 'team-run',
+        signal: controller.signal,
+        panelsVisible: false,
+        tabGroup: undefined,
+        associateTabs: () => true,
+      },
+    })
+    const server = inspect(runtime.createMcpServer({ leaseToken: lease.token }))
+    expect(
+      (await server._registeredTools.tabs.handler({ action: 'list' })).isError,
+    ).toBeUndefined()
+    controller.abort()
+    runs.start(conversationId, 'unrelated-new-turn')
+    expect(
+      (await server._registeredTools.tabs.handler({ action: 'list' })).isError,
+    ).toBe(true)
+    expect(
+      (
+        await server._registeredTools.tabs.handler({
+          action: 'new',
+          url: 'https://example.com',
+        })
+      ).isError,
+    ).toBe(true)
+  })
   it('treats a read-only lease as an authoritative permission ceiling', async () => {
     const { browserMcp: runtime, runs } = moduleFixture()
     const conversationId = crypto.randomUUID()

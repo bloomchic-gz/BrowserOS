@@ -60,6 +60,7 @@ import {
 } from './conversation-run-client'
 import { useExecutionHistoryTracker } from './execution-history-tracker.hooks'
 import { PanelConversationAttachment } from './panel-conversation-attachment'
+import { usePaperclipConnection } from './paperclip-connection.hooks'
 import { toLlmProviderConfig } from './sidepanel-chat-targets'
 import { stripImageToolOutputs } from './tool-output-strip'
 
@@ -538,6 +539,31 @@ export const useChatSession = (options?: ChatSessionOptions) => {
       })
     },
   })
+
+  const isPaperclipConversation =
+    selectedChatTarget?.kind === 'acp' &&
+    selectedChatTarget.agentType === 'paperclip'
+  const paperclipConnection = usePaperclipConnection(
+    conversationId,
+    isPaperclipConversation,
+  )
+  useEffect(() => {
+    if (
+      !isPaperclipConversation ||
+      status === 'streaming' ||
+      status === 'submitted' ||
+      !paperclipConnection.data
+    )
+      return
+    const remote = paperclipConnection.data.messages
+    if (JSON.stringify(remote) !== JSON.stringify(messages)) setMessages(remote)
+  }, [
+    isPaperclipConversation,
+    paperclipConnection.data,
+    messages,
+    setMessages,
+    status,
+  ])
 
   const detachView = useCallback(async () => {
     await detachStream()

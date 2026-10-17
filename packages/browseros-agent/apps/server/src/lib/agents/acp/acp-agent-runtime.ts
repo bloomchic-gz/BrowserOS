@@ -28,10 +28,14 @@ import type { AcpAgentDefinition } from '../agent-types'
 import { deriveAcpSessionKey } from '../storage/acp-agent-store'
 import { type AcpAgentPolicy, buildAcpAgentPolicy } from './acp-agent-policy'
 import { ensureAcpWorkspace } from './browseros-instructions'
-import { PaperclipAgentRuntime } from './paperclip-agent-runtime'
+import {
+  PaperclipAgentRuntime,
+  type PaperclipRuntimeDeps,
+} from './paperclip-agent-runtime'
 
 export interface AcpAgentRuntimeOptions {
   serverPort: number
+  paperclipDeps?: PaperclipRuntimeDeps
   resourcesDir?: string | null
   browserosDir?: string
   stateDir?: string
@@ -82,7 +86,7 @@ export class AcpAgentPreparationError extends Error {
  * response and turn lock, so neither replies nor browser actions are duplicated.
  */
 export class AcpAgentRuntime {
-  private readonly paperclip: PaperclipAgentRuntime
+  readonly paperclip: PaperclipAgentRuntime
   private readonly serverPort: number
   private readonly resourcesDir: string | null
   private readonly browserosDir: string
@@ -111,6 +115,7 @@ export class AcpAgentRuntime {
     this.paperclip = new PaperclipAgentRuntime(
       this.serverPort,
       join(this.browserosDir, 'agents', 'paperclip-sessions'),
+      options.paperclipDeps,
     )
     this.idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS
     this.createProvider = options.createProvider ?? createAcpxProvider

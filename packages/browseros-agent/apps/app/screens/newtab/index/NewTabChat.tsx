@@ -2,6 +2,7 @@ import { Loader2 } from 'lucide-react'
 import { type FC, useEffect, useRef } from 'react'
 import { useSearchParams } from 'react-router'
 import { NoProviderNotice } from '@/components/chat/NoProviderNotice'
+import { PaperclipConnectionBar } from '@/components/chat/PaperclipConnectionBar'
 import {
   createAITabAction,
   createBrowserOSAction,
@@ -153,6 +154,9 @@ export const NewTabChat: FC = () => {
         hideHistory
         className="shrink-0 px-4 sm:px-8"
       />
+      {selectedProvider?.brandKey === 'paperclip' && (
+        <PaperclipConnectionBar conversationId={conversationId} />
+      )}
 
       {/* Keep transcript and composer widths in sync; only the header spans the page. */}
       <main className="styled-scrollbar [&_[data-streamdown='code-block']]:!max-w-full [&_[data-streamdown='code-block']]:!w-auto [&_[data-streamdown='table-wrapper']]:!max-w-full [&_[data-streamdown='table-wrapper']]:!w-auto mx-auto flex min-h-0 w-full max-w-5xl flex-1 flex-col space-y-4 overflow-y-auto overflow-x-hidden px-4 pt-4 sm:w-[calc(100%-4rem)] [&_[data-streamdown='code-block']]:overflow-x-auto [&_[data-streamdown='table-wrapper']]:overflow-x-auto">

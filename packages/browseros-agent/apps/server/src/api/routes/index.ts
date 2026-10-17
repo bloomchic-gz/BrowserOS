@@ -5,6 +5,7 @@ import { createDiagnosticsRoute } from './diagnostics'
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+import { createBrowserOutputFileAccess } from '@browseros/browser-mcp/output-file'
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { AcpAgentRuntime } from '../../lib/agents/acp/acp-agent-runtime'
@@ -47,7 +48,6 @@ export function createApiRoutes(deps: CreateApiRoutesDeps): Hono<Env> {
   const { browser, browserosId, browserSession, port, resourcesDir, version } =
     config
   const { activity } = config
-  const acpRuntime = new AcpAgentRuntime({ serverPort: port, resourcesDir })
   const conversationRuns = new ConversationRuns({ activity })
   // One deep module owns every browser-tool lease and execution effect;
   // both /chat and /mcp must share it for loopback calls to recover context.
@@ -58,6 +58,56 @@ export function createApiRoutes(deps: CreateApiRoutesDeps): Hono<Env> {
     klavis,
     activity,
   })
+  const remoteOutputFiles = new Map<
+    string,
+    ReturnType<typeof createBrowserOutputFileAccess>
+  >()
+  const acpRuntime = new AcpAgentRuntime({
+    serverPort: port,
+    resourcesDir,
+    paperclipDeps: {
+      createToolLease: (scope, runId, signal) => {
+        let outputFileAccess = remoteOutputFiles.get(scope.conversationId)
+        if (!outputFileAccess) {
+          outputFileAccess = createBrowserOutputFileAccess()
+          remoteOutputFiles.set(scope.conversationId, outputFileAccess)
+        }
+        return browserMcp.createLease({
+          ...scope,
+          source: 'paperclip',
+          outputFileAccess,
+          remoteRun: {
+            conversationId: scope.conversationId,
+            runId,
+            signal,
+            panelsVisible: false,
+            tabGroup: undefined,
+            associateTabs: () => !signal.aborted,
+          },
+        })
+      },
+    },
+  })
+  void acpRuntime.paperclip.restore()
+  const paperclipRoutes: Hono<Env> = new Hono<Env>()
+    .get('/:id', (c) =>
+      Response.json(acpRuntime.paperclip.state(c.req.param('id'))),
+    )
+    .post('/:id/:action', async (c) => {
+      const action = c.req.param('action')
+      if (!['pause', 'resume', 'stop'].includes(action))
+        return c.json({ error: 'Unknown action' }, 400)
+      try {
+        return Response.json(
+          await acpRuntime.paperclip.control(
+            c.req.param('id'),
+            action as 'pause' | 'resume' | 'stop',
+          ),
+        )
+      } catch {
+        return c.json({ error: 'Unable to change Paperclip connection' }, 409)
+      }
+    })
   const resolvedAgentRoutes =
     agentRoutes ??
     createAgentRoutes({
@@ -65,14 +115,21 @@ export function createApiRoutes(deps: CreateApiRoutesDeps): Hono<Env> {
         acpRuntime.closeAllForAgent(agentId, {
           discardPersistentState: true,
         }),
-      onUpdate: (agentId) =>
-        acpRuntime.closeAllForAgent(agentId, {
+      onUpdate: async (agentId) => {
+        if (await acpRuntime.paperclip.refreshAgent(agentId)) return
+        await acpRuntime.closeAllForAgent(agentId, {
           discardPersistentState: true,
-        }),
+        })
+      },
     })
 
+  const app = new Hono<Env>()
+  app.use('/paperclip/*', cors(defaultCorsConfig))
+  app.use('/paperclip/*', requireTrustedOrigin())
+  app.use('/paperclip/*', requireTrustedAppOrigin())
+  app.route('/paperclip', paperclipRoutes)
   return (
-    new Hono<Env>()
+    app
       .use('/*', cors(defaultCorsConfig))
       .use('/*', requireTrustedOrigin())
       .route('/system/health', createHealthRoute({ browser }))
@@ -134,7 +191,12 @@ export function createApiRoutes(deps: CreateApiRoutesDeps): Hono<Env> {
       .use('/scheduled-job-runs/*', requireTrustedAppOrigin())
       .route('/acpx/probe', createAcpxProbeRoutes({ resourcesDir }))
       .route('/agents', resolvedAgentRoutes)
-      .route('/conversations', createConversationRoutes())
+      .route(
+        '/conversations',
+        createConversationRoutes({
+          beforeDelete: (id) => acpRuntime.paperclip.forget(id),
+        }),
+      )
       .route('/providers', createProvidersRoutes())
       .route('/test-provider', createProviderRoutes({ browserosId }))
       .route('/refine-prompt', createRefinePromptRoutes({ browserosId }))

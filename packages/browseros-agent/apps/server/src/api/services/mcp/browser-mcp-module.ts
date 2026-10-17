@@ -15,9 +15,13 @@ import type {
 import { tabs } from '@browseros/browser-mcp/tools/tabs'
 import type { BrowserContext } from '@browseros/shared/schemas/browser-context'
 import { z } from 'zod/v4'
+import { BROWSEROS_ACP_INSTRUCTIONS } from '../../../lib/agents/acp/browseros-instructions'
 import { logger } from '../../../lib/logger'
 import { shouldLogToolRegistration } from '../../../tools/registration-log-sampling'
-import type { ConversationRuns } from '../conversation-runs'
+import type {
+  ActiveConversationRun,
+  ConversationRuns,
+} from '../conversation-runs'
 import type { KlavisService } from '../klavis'
 import type { ServerActivity } from '../server-activity'
 import { dispatchBrowserTool } from './browser-tool-dispatch'
@@ -36,6 +40,8 @@ export interface BrowserMcpModuleDeps {
 }
 
 export interface BrowserToolLeaseInput {
+  /** Internally minted, call-scoped remote run authority. Never accepted from HTTP. */
+  remoteRun?: ActiveConversationRun
   conversationId: string
   readOnly: boolean
   outputFileAccess: BrowserOutputFileAccess
@@ -149,7 +155,10 @@ export class BrowserMcpModule {
       version: this.deps.version,
       browserSession: this.deps.browserSession,
       defaultWindowId: lease?.browserContext?.windowId,
-      instructions: MCP_INSTRUCTIONS,
+      instructions:
+        lease?.source === 'paperclip' && lease.remoteRun
+          ? `${BROWSEROS_ACP_INSTRUCTIONS}\n${MCP_INSTRUCTIONS}`
+          : MCP_INSTRUCTIONS,
       registration: {
         tools,
         includeStructuredContent: input.includeStructuredContent ?? false,
@@ -173,7 +182,11 @@ export class BrowserMcpModule {
         authorizeCall: () => {
           if (
             lease &&
-            !this.deps.conversationRuns.activeRun(lease.conversationId)
+            !(lease.remoteRun
+              ? !lease.remoteRun.signal.aborted
+                ? lease.remoteRun
+                : undefined
+              : this.deps.conversationRuns.activeRun(lease.conversationId))
           ) {
             return 'MCP tools require an active conversation run.'
           }
@@ -198,7 +211,11 @@ export class BrowserMcpModule {
     // Resolve once and carry this exact handle through execution. If another
     // turn starts before effects run, its record-identity check rejects them.
     const run = lease
-      ? this.deps.conversationRuns.activeRun(lease.conversationId)
+      ? lease.remoteRun
+        ? !lease.remoteRun.signal.aborted
+          ? lease.remoteRun
+          : undefined
+        : this.deps.conversationRuns.activeRun(lease.conversationId)
       : undefined
     return await dispatchBrowserTool({
       tool,

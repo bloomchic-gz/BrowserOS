@@ -1,280 +1,675 @@
-import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { mkdir, readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { PaperclipAgentConfig } from '@browseros/shared/schemas/agent'
-import { createUIMessageStream, type UIMessageChunk } from 'ai'
+import { createUIMessageStream, type UIMessage, type UIMessageChunk } from 'ai'
 import { z } from 'zod'
-import { BROWSEROS_TOOL_LEASE_HEADER } from '../../browser-tool-lease'
+import type { BrowserToolLease } from '../../../api/services/mcp/browser-mcp-module'
+import {
+  type ConversationStore,
+  DbConversationStore,
+} from '../../conversations/conversation-store'
+import type { AcpAgentDefinition } from '../agent-types'
 import { DbAcpAgentStore } from '../storage/acp-agent-store'
 import type { AcpAgentStreamInput } from './acp-agent-runtime'
+import {
+  type Binding,
+  type CommentSchema,
+  callLocalBrowser,
+  freshPaperclipConfig,
+  loadBinding,
+  MessagesSchema,
+  PollSchema,
+  paperclipRequest,
+  type SentMessage,
+  SnapshotSchema,
+} from './paperclip-client'
 
-type Json = Record<string, unknown>
-const SnapshotSchema = z.object({
-  comments: z.array(
-    z.object({
-      id: z.string(),
-      authorAgentId: z.string().nullish(),
-      body: z.string(),
-    }),
-  ),
-  liveRuns: z.array(z.unknown()),
-  run: z
-    .object({
-      id: z.string(),
-      status: z.string(),
-      resultJson: z.object({ summary: z.string().nullish() }).nullish(),
-    })
-    .nullable(),
-  taskUrl: z.string().optional(),
-  output: z.object({ offset: z.number(), text: z.string() }).nullish(),
-})
-const PollSchema = z.object({
-  calls: z.array(
-    z.object({
-      id: z.string(),
-      request: z.object({
-        jsonrpc: z.literal('2.0'),
-        id: z.union([z.string(), z.number()]).optional(),
-        method: z.string(),
-        params: z.record(z.string(), z.unknown()).optional(),
-      }),
-    }),
-  ),
-})
-const ResponseSchema = z.object({
-  result: z.unknown().optional(),
-  error: z.object({ message: z.string(), code: z.number() }).optional(),
-  jsonrpc: z.string().optional(),
-  id: z.union([z.string(), z.number(), z.null()]).optional(),
-})
-const TokensSchema = z.object({
-  access_token: z.string().min(1),
-  refresh_token: z.string().min(1),
-  expires_in: z.number().positive(),
-})
-type SentMessage = {
-  requestId: string
-  body: string
-  settings?: { modelId: string | null; reasoningEffort: string | null }
-  oldRun?: string
-  commentIds: string[]
-}
-type Binding = {
-  identity: string
-  request: Json
-  taskId?: string
-  messages?: Record<string, SentMessage>
-}
-const refreshes = new Map<string, Promise<PaperclipAgentConfig>>()
+export { freshPaperclipConfig, paperclipRequest } from './paperclip-client'
 
-export async function paperclipRequest(
-  config: PaperclipAgentConfig,
-  path: string,
-  body?: unknown,
-  signal?: AbortSignal,
-): Promise<unknown> {
-  const response = await fetch(
-    `${new URL(config.url).origin}/api/browseros${path}`,
-    {
-      method: body === undefined ? 'GET' : 'POST',
-      redirect: 'error',
-      headers: {
-        Authorization: `Bearer ${config.token}`,
-        'Content-Type': 'application/json',
-      },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      signal: signal
-        ? AbortSignal.any([signal, AbortSignal.timeout(35_000)])
-        : AbortSignal.timeout(35_000),
-    },
-  )
-  if (!response.ok)
-    throw new Error(
-      response.status === 401
-        ? 'Reconnect your Paperclip account.'
-        : `Paperclip request failed (${response.status}). Check the linked task before retrying.`,
-    )
-  const result: unknown = await response.json()
-  const outcome = z
-    .object({
-      outcome: z.enum(['rejected', 'unknown']),
-      message: z.string().optional(),
-    })
-    .safeParse(result)
-  if (outcome.success)
-    throw new Error(
-      outcome.data.outcome === 'rejected'
-        ? `Paperclip rejected this message. ${outcome.data.message ?? 'Check the linked task.'}`
-        : 'Paperclip could not confirm this message. Check the linked task before sending another message.',
-    )
-  return result
+type Scope = Pick<
+  AcpAgentStreamInput,
+  'conversationId' | 'readOnly' | 'browserContext'
+>
+type PersistentBinding = Binding &
+  Scope & {
+    agentId: string
+    enabled: boolean
+    deleted?: boolean
+    localSettings?: string
+    transcript?: UIMessage[]
+    outputs?: Record<string, { offset: number; text: string; status: string }>
+  }
+type Worker = {
+  binding: PersistentBinding
+  config: PaperclipAgentConfig
+  save: (binding: Binding) => Promise<void>
+  controller: AbortController
+  call?: AbortController
+  leaseId?: string
+  status: string
+  error?: string
+  taskUrl?: string
+  snapshot?: z.infer<typeof SnapshotSchema>
+  job?: Promise<void>
+  sync?: Promise<void>
+  syncController?: AbortController
 }
-
-export async function freshPaperclipConfig(
-  agentId: string,
-  fallback: PaperclipAgentConfig,
-): Promise<PaperclipAgentConfig> {
-  if (!fallback.refreshToken || !fallback.oauthClientId) return fallback
-  const pending = refreshes.get(agentId)
-  if (pending) return pending
-  const refresh = (async () => {
-    const store = new DbAcpAgentStore()
-    const config = (await store.get(agentId))?.paperclipConfig ?? fallback
-    if (
-      config.expiresAt === undefined ||
-      config.expiresAt > Date.now() + 60_000
-    )
-      return config
-    const response = await fetch(
-      `${new URL(config.url).origin}/mcp/oauth/token`,
-      {
-        method: 'POST',
-        redirect: 'error',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          grant_type: 'refresh_token',
-          client_id: config.oauthClientId,
-          refresh_token: config.refreshToken,
-          resource: `${new URL(config.url).origin}/mcp/paperclip`,
-        }),
-        signal: AbortSignal.timeout(15_000),
-      },
-    )
-    if (!response.ok) throw new Error('Reconnect your Paperclip account.')
-    const tokens = TokensSchema.parse(await response.json())
-    const next = {
-      ...config,
-      token: String(tokens.access_token),
-      refreshToken: String(tokens.refresh_token),
-      expiresAt: Date.now() + Number(tokens.expires_in) * 1000,
+export interface PaperclipRuntimeDeps {
+  createToolLease: (
+    scope: Scope,
+    runId: string,
+    signal: AbortSignal,
+  ) => BrowserToolLease
+  store?: Pick<ConversationStore, 'get' | 'save'>
+  getAgent?: (id: string) => Promise<AcpAgentDefinition | null>
+}
+const pause = (signal: AbortSignal, ms = 1500) =>
+  new Promise<void>((resolve) => {
+    if (signal.aborted) return resolve()
+    const done = () => {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', done)
+      resolve()
     }
-    await store.update(agentId, { paperclipConfig: next })
-    return next
-  })()
-  refreshes.set(agentId, refresh)
-  try {
-    return await refresh
-  } finally {
-    refreshes.delete(agentId)
-  }
-}
+    const timer = setTimeout(done, ms)
+    signal.addEventListener('abort', done, { once: true })
+  })
+const activeStatuses = ['queued', 'running', 'scheduled_retry']
 
-async function callLocalBrowser(
-  serverPort: number,
-  input: AcpAgentStreamInput,
-  request: z.infer<typeof PollSchema>['calls'][number]['request'],
-  signal: AbortSignal,
-) {
-  let result: z.infer<typeof ResponseSchema>
-  try {
-    const response = await fetch(
-      `http://127.0.0.1:${serverPort}/mcp${input.readOnly ? '?read_only=1' : ''}`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json, text/event-stream',
-          [BROWSEROS_TOOL_LEASE_HEADER]: input.browserToolLeaseToken,
-        },
-        body: JSON.stringify(request),
-        signal: AbortSignal.any([signal, AbortSignal.timeout(25_000)]),
-        redirect: 'error',
-      },
-    )
-    if (!response.ok)
-      throw new Error(`Local browser returned ${response.status}`)
-    const raw = await response.text()
-    if (response.headers.get('content-type')?.includes('text/event-stream')) {
-      const events = raw
-        .split(/\r?\n/)
-        .filter((line) => line.startsWith('data:'))
-        .map((line) => ResponseSchema.parse(JSON.parse(line.slice(5))))
-      const found = events.find((event) => event.id === request.id)
-      if (!found) throw new Error('Browser MCP response missing')
-      result = found
-    } else result = ResponseSchema.parse(JSON.parse(raw))
-  } catch (error) {
-    result = {
-      jsonrpc: '2.0',
-      id: request.id,
-      error: {
-        code: -32000,
-        message: error instanceof Error ? error.message : 'Browser unavailable',
-      },
-    }
-  }
-  return result
-}
-
-async function loadBinding(
-  stateDir: string,
-  key: string,
-  input: AcpAgentStreamInput,
-  config: PaperclipAgentConfig,
-  title: string,
-) {
-  const identity = `${new URL(config.url).origin}:${config.clientId}:${config.remoteAgentId}`
-  const filename = join(
-    stateDir,
-    `${createHash('sha256').update(key).digest('hex')}.json`,
-  )
-  await mkdir(stateDir, { recursive: true, mode: 0o700 })
-  const save = async (binding: Binding) => {
-    const tmp = `${filename}.${randomUUID()}.tmp`
-    await writeFile(tmp, JSON.stringify(binding), { mode: 0o600 })
-    await rename(tmp, filename)
-  }
-  let binding: Binding
-  try {
-    binding = JSON.parse(await readFile(filename, 'utf8'))
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-    binding = {
-      identity,
-      request: {
-        requestId: randomUUID(),
-        conversationId: input.conversationId,
-        clientId: config.clientId,
-        agentId: config.remoteAgentId,
-        title: (
-          title.match(/<USER_QUERY>\s*([\s\S]*?)<\/USER_QUERY>/)?.[1] ?? title
-        )
-          .trim()
-          .slice(0, 200),
-      },
-    }
-    await save(binding)
-  }
-  if (binding.identity !== identity)
-    throw new Error(
-      'This conversation belongs to another Paperclip connection. Start a new conversation.',
-    )
-
-  return { binding, save }
-}
-
+/** The desktop service owns the connection; chat streams are only observers. */
 export class PaperclipAgentRuntime {
+  private restoration?: Promise<void>
+  private workers = new Map<string, Worker>()
   private active = new Map<string, AbortController>()
+  private store: Pick<ConversationStore, 'get' | 'save'>
   constructor(
     private serverPort: number,
     private stateDir: string,
-  ) {}
-
+    private deps?: PaperclipRuntimeDeps,
+  ) {
+    this.store = deps?.store ?? new DbConversationStore()
+  }
+  private getAgent(id: string) {
+    return this.deps?.getAgent?.(id) ?? new DbAcpAgentStore().get(id)
+  }
+  restore() {
+    this.restoration ??= this.restoreSaved()
+    return this.restoration
+  }
+  private async restoreSaved() {
+    await mkdir(this.stateDir, { recursive: true, mode: 0o700 })
+    for (const name of await readdir(this.stateDir)) {
+      if (!name.endsWith('.json')) continue
+      try {
+        const binding: PersistentBinding = JSON.parse(
+          await readFile(join(this.stateDir, name), 'utf8'),
+        )
+        if (
+          !binding.agentId ||
+          !binding.taskId ||
+          !binding.conversationId ||
+          binding.deleted
+        )
+          continue
+        const agent = await this.getAgent(binding.agentId)
+        if (!agent?.paperclipConfig) continue
+        const input = {
+          agent,
+          ...binding,
+          messages: [],
+          browserToolLeaseToken: '',
+        }
+        const loaded = await loadBinding(
+          this.stateDir,
+          `${agent.id}:${binding.conversationId}`,
+          input,
+          agent.paperclipConfig,
+          '',
+        )
+        const worker = this.register(
+          binding,
+          agent.paperclipConfig,
+          loaded.save,
+        )
+        this.start(worker)
+      } catch {
+        /* A bad or retargeted binding never grants browser authority. */
+      }
+    }
+  }
+  private register(
+    binding: PersistentBinding,
+    config: PaperclipAgentConfig,
+    save: Worker['save'],
+  ) {
+    const existing = this.workers.get(binding.conversationId)
+    if (existing) return existing
+    const worker: Worker = {
+      binding,
+      config,
+      save,
+      controller: new AbortController(),
+      status: binding.enabled ? 'connecting' : 'paused',
+    }
+    this.workers.set(binding.conversationId, worker)
+    return worker
+  }
+  private async api(
+    worker: Worker,
+    path: string,
+    body?: unknown,
+    signal?: AbortSignal,
+  ) {
+    worker.config = await freshPaperclipConfig(
+      worker.binding.agentId,
+      worker.config,
+    )
+    return paperclipRequest(worker.config, path, body, signal)
+  }
+  private start(worker: Worker) {
+    this.startSync(worker)
+    if (worker.job || !worker.binding.enabled) return
+    worker.controller = new AbortController()
+    const signal = worker.controller.signal
+    worker.job = (async () => {
+      while (!signal.aborted) {
+        try {
+          worker.status = 'connecting'
+          const attached = z
+            .object({ leaseId: z.string() })
+            .parse(
+              await this.api(
+                worker,
+                `/tasks/${worker.binding.taskId}/attach`,
+                { clientId: worker.config.clientId },
+                signal,
+              ),
+            )
+          worker.leaseId = attached.leaseId
+          worker.status = 'online'
+          worker.error = undefined
+          while (!signal.aborted) {
+            const { calls } = PollSchema.parse(
+              await this.api(
+                worker,
+                `/leases/${worker.leaseId}/poll`,
+                {},
+                signal,
+              ),
+            )
+            for (const call of calls) {
+              signal.throwIfAborted()
+              await this.api(
+                worker,
+                `/leases/${worker.leaseId}/check`,
+                { callId: call.id },
+                signal,
+              )
+              const controller = new AbortController()
+              worker.call = controller
+              const callSignal = AbortSignal.any([signal, controller.signal])
+              const lease = this.deps?.createToolLease(
+                worker.binding,
+                call.runId,
+                callSignal,
+              )
+              if (!lease)
+                throw new Error('Persistent browser tools are not configured.')
+              // Revocation must also abort a long-running local tool, even if a
+              // different run has already started on this Task.
+              const watchdog = (async () => {
+                while (!callSignal.aborted) {
+                  await pause(callSignal, 1000)
+                  if (callSignal.aborted) break
+                  try {
+                    await this.api(
+                      worker,
+                      `/leases/${worker.leaseId}/check`,
+                      { callId: call.id },
+                      callSignal,
+                    )
+                  } catch {
+                    controller.abort()
+                  }
+                }
+              })()
+              try {
+                const response = await callLocalBrowser(
+                  this.serverPort,
+                  { ...worker.binding, browserToolLeaseToken: lease.token },
+                  call.request,
+                  callSignal,
+                )
+                await this.api(
+                  worker,
+                  `/leases/${worker.leaseId}/respond`,
+                  { callId: call.id, response },
+                  signal,
+                )
+              } finally {
+                lease.revoke()
+                controller.abort()
+                await watchdog
+                worker.call = undefined
+              }
+            }
+          }
+        } catch (error) {
+          if (!signal.aborted) {
+            worker.status = 'offline'
+            worker.error =
+              error instanceof Error ? error.message : 'Connection failed'
+            await pause(signal, 3000)
+          }
+        }
+      }
+    })().finally(() => {
+      worker.job = undefined
+    })
+  }
+  private startSync(worker: Worker) {
+    if (worker.sync) return
+    worker.syncController = new AbortController()
+    const signal = worker.syncController.signal
+    worker.sync = (async () => {
+      while (!signal.aborted) {
+        try {
+          await this.sync(worker, signal)
+        } catch (error) {
+          if (!signal.aborted)
+            worker.error =
+              error instanceof Error ? error.message : 'Sync failed'
+        }
+        await pause(signal, 2000)
+      }
+    })().finally(() => {
+      worker.sync = undefined
+    })
+  }
+  // Full paginated reconciliation also reflects edited/deleted comments. Stable
+  // IDs make restart/reconnect idempotent; no synchronized message is submitted.
+  private async sync(worker: Worker, signal: AbortSignal) {
+    const b = worker.binding
+    const snapshot = SnapshotSchema.parse(
+      await this.api(worker, `/tasks/${b.taskId}/snapshot`, undefined, signal),
+    )
+    worker.snapshot = snapshot
+    worker.taskUrl = snapshot.taskUrl
+    if (worker.call && !snapshot.liveRuns.length) worker.call.abort()
+    const comments: z.infer<typeof CommentSchema>[] = []
+    let after: string | null = null
+    do {
+      const page: {
+        comments: z.infer<typeof CommentSchema>[]
+        next: string | null
+      } = MessagesSchema.parse(
+        await this.api(
+          worker,
+          `/tasks/${b.taskId}/messages${after ? `?after=${after}` : ''}`,
+          undefined,
+          signal,
+        ),
+      )
+      comments.push(...page.comments)
+      after = page.next
+    } while (after && !signal.aborted)
+    b.outputs ??= {}
+    if (snapshot.run) {
+      const run = snapshot.run
+      const output = b.outputs[run.id] ?? {
+        offset: 0,
+        text: '',
+        status: run.status,
+      }
+      const log = SnapshotSchema.parse(
+        await this.api(
+          worker,
+          `/tasks/${b.taskId}/snapshot?runId=${run.id}&logOffset=${output.offset}`,
+          undefined,
+          signal,
+        ),
+      )
+      if (log.output) {
+        output.offset = log.output.offset
+        output.text += log.output.text
+      }
+      output.status = run.status
+      if (!activeStatuses.includes(run.status) && !output.text)
+        output.text = run.resultJson?.summary ?? `Paperclip run ${run.status}.`
+      b.outputs[run.id] = output
+    }
+    const messages: UIMessage[] = comments
+      .filter((c) => !c.deletedAt)
+      .map((c) => {
+        const local = Object.entries(b.messages ?? {}).find(
+          ([, sent]) => sent.requestId === c.clientRequestId,
+        )
+        return {
+          id: local?.[0] ?? `paperclip-comment-${c.id}`,
+          role:
+            c.authorAgentId || c.derivedAuthorAgentId ? 'assistant' : 'user',
+          parts: [
+            {
+              type: 'text',
+              text:
+                c.body
+                  .match(/<USER_QUERY>\s*([\s\S]*?)<\/USER_QUERY>/)?.[1]
+                  ?.trim() ?? c.body,
+            },
+          ],
+          metadata: {
+            paperclipCommentId: c.id,
+            authorUserId: c.authorUserId,
+            authorAgentId: c.authorAgentId ?? c.derivedAuthorAgentId,
+          },
+        }
+      })
+    for (const [runId, output] of Object.entries(b.outputs)) {
+      if (
+        !output.text ||
+        comments.some(
+          (c) =>
+            !c.deletedAt &&
+            (c.createdByRunId === runId || c.derivedCreatedByRunId === runId) &&
+            (c.authorAgentId || c.derivedAuthorAgentId),
+        )
+      )
+        continue
+      messages.push({
+        id: `paperclip-run-${runId}`,
+        role: 'assistant',
+        parts: [{ type: 'text', text: output.text }],
+      })
+    }
+    if (JSON.stringify(messages) !== JSON.stringify(b.transcript)) {
+      b.transcript = messages
+      await this.store.save({
+        id: b.conversationId,
+        messages,
+        targetType: 'paperclip',
+        agentId: b.agentId,
+      })
+    }
+    await worker.save(b)
+  }
+  state(conversationId: string) {
+    const w = this.workers.get(conversationId)
+    if (!w) return null
+    return {
+      enabled: w.binding.enabled,
+      status: w.status,
+      error: w.error,
+      taskId: w.binding.taskId,
+      taskUrl: w.taskUrl,
+      readOnly: w.binding.readOnly,
+      run: w.snapshot?.run,
+      messages: w.binding.transcript ?? [],
+    }
+  }
+  async control(conversationId: string, action: 'pause' | 'resume' | 'stop') {
+    const w = this.workers.get(conversationId)
+    if (!w) throw new Error('Unknown Paperclip conversation')
+    if (action === 'stop') {
+      w.call?.abort()
+      await this.api(w, `/tasks/${w.binding.taskId}/stop`, {})
+    } else if (action === 'pause') {
+      w.binding.enabled = false
+      w.controller.abort()
+      w.call?.abort()
+      await w.job
+      if (w.leaseId)
+        await this.api(w, `/leases/${w.leaseId}/detach`, {}).catch(
+          () => undefined,
+        )
+      w.leaseId = undefined
+      w.status = 'paused'
+      await w.save(w.binding)
+    } else {
+      const agent = await this.getAgent(w.binding.agentId)
+      const config = agent?.paperclipConfig
+      if (
+        !config ||
+        w.binding.identity !==
+          `${new URL(config.url).origin}:${config.clientId}:${config.remoteAgentId}`
+      )
+        throw new Error('Connection changed. Start a new conversation.')
+      w.config = config
+      w.binding.enabled = true
+      await w.save(w.binding)
+      this.start(w)
+    }
+    return this.state(conversationId)
+  }
+  async forget(conversationId: string) {
+    const w = this.workers.get(conversationId)
+    if (!w) return
+    await this.control(conversationId, 'pause')
+    w.syncController?.abort()
+    await w.sync
+    w.binding.deleted = true
+    await w.save(w.binding)
+    this.workers.delete(conversationId)
+  }
+  async shutdown() {
+    for (const w of this.workers.values()) {
+      w.controller.abort()
+      w.syncController?.abort()
+      w.call?.abort()
+    }
+    for (const w of this.workers.values()) {
+      await Promise.all([w.job, w.sync])
+      if (w.leaseId)
+        await this.api(w, `/leases/${w.leaseId}/detach`, {}).catch(
+          () => undefined,
+        )
+    }
+  }
+  async refreshAgent(agentId: string) {
+    const agent = await this.getAgent(agentId)
+    if (agent?.type !== 'paperclip' || !agent.paperclipConfig) return false
+    const config = agent.paperclipConfig
+    const identity = `${new URL(config.url).origin}:${config.clientId}:${config.remoteAgentId}`
+    for (const w of this.workers.values())
+      if (w.binding.agentId === agentId) {
+        if (w.binding.identity === identity) w.config = config
+        else {
+          await this.control(w.binding.conversationId, 'pause')
+          w.syncController?.abort()
+          await w.sync
+        }
+      }
+    return true
+  }
   close(agentId: string, conversationId?: string) {
     let count = 0
-    for (const [key, controller] of this.active) {
+    for (const [key, controller] of this.active)
       if (
-        conversationId
-          ? key === `${agentId}:${conversationId}`
-          : key.startsWith(`${agentId}:`)
+        key.startsWith(`${agentId}:`) &&
+        (!conversationId || key === `${agentId}:${conversationId}`)
       ) {
         controller.abort()
         count++
       }
-    }
+    // Config deletion/update revokes all task connections. Merely closing a
+    // view must not call this; explicit conversation deletion uses forget().
+    if (!conversationId)
+      for (const w of this.workers.values())
+        if (w.binding.agentId === agentId) {
+          w.controller.abort()
+          w.syncController?.abort()
+          void this.control(w.binding.conversationId, 'pause').catch(
+            () => undefined,
+          )
+          count++
+        }
     return count
   }
-
+  private async prepareMessage(
+    input: AcpAgentStreamInput,
+    signal: AbortSignal,
+  ) {
+    await this.restore()
+    signal.throwIfAborted()
+    const key = `${input.agent.id}:${input.conversationId}`
+    const config = input.agent.paperclipConfig
+    if (!config) throw new Error('Paperclip connection is not configured.')
+    const latest = input.messages.findLast((m) => m.role === 'user')
+    if (!latest || latest.parts.some((p) => p.type === 'file'))
+      throw new Error(
+        'A text message is required. Add attachments in Paperclip.',
+      )
+    const body = latest.parts
+      .flatMap((p) => (p.type === 'text' ? [p.text] : []))
+      .join('\n')
+    const loaded = await loadBinding(this.stateDir, key, input, config, body)
+    const existing = this.workers.get(input.conversationId)
+    if (existing && existing.binding.agentId !== input.agent.id)
+      throw new Error(
+        'This conversation belongs to another agent. Start a new conversation.',
+      )
+    if ((loaded.binding as PersistentBinding).deleted)
+      throw new Error(
+        'This conversation was deleted. Start a new conversation.',
+      )
+    const binding: PersistentBinding =
+      existing?.binding ??
+      Object.assign(loaded.binding, {
+        agentId: input.agent.id,
+        conversationId: input.conversationId,
+        enabled: true,
+        readOnly: input.readOnly,
+        browserContext: input.browserContext,
+      })
+    if (!binding.taskId) {
+      const opened = z
+        .object({ task: z.object({ id: z.string() }) })
+        .parse(
+          await paperclipRequest(
+            await freshPaperclipConfig(input.agent.id, config),
+            '/open',
+            binding.request,
+            signal,
+          ),
+        )
+      binding.taskId = opened.task.id
+      await loaded.save(binding)
+    }
+    const worker = this.register(binding, config, loaded.save)
+    if (!worker.binding.enabled)
+      throw new Error(
+        'Remote browser control is paused. Resume the connection before sending.',
+      )
+    // Restrictions can only change explicitly from this local conversation.
+    binding.readOnly = input.readOnly
+    binding.browserContext = input.browserContext
+    this.start(worker)
+    const deadline = Date.now() + 30_000
+    while (worker.status !== 'online' && Date.now() < deadline) {
+      signal.throwIfAborted()
+      await pause(signal, 100)
+    }
+    if (worker.status !== 'online')
+      throw new Error(worker.error ?? 'Browser connection unavailable')
+    const baseline = SnapshotSchema.parse(
+      await this.api(
+        worker,
+        `/tasks/${binding.taskId}/snapshot`,
+        undefined,
+        signal,
+      ),
+    )
+    binding.messages ??= {}
+    let sent = binding.messages[latest.id]
+    if (!sent) {
+      const settings = {
+        modelId: input.agent.modelId ?? null,
+        reasoningEffort: input.agent.reasoningEffort ?? null,
+      }
+      const fingerprint = JSON.stringify(settings)
+      sent = {
+        requestId: randomUUID(),
+        body,
+        oldRun: baseline.run?.id,
+        commentIds: baseline.comments.map((c) => c.id),
+        ...(binding.localSettings !== fingerprint ? { settings } : {}),
+      }
+      binding.messages[latest.id] = sent
+      await worker.save(binding)
+    }
+    await this.api(
+      worker,
+      `/tasks/${binding.taskId}/send`,
+      {
+        requestId: sent.requestId,
+        body: sent.body,
+        ...(sent.settings ? { settings: sent.settings } : {}),
+      },
+      signal,
+    )
+    if (sent.settings) {
+      binding.localSettings = JSON.stringify(sent.settings)
+      await worker.save(binding)
+    }
+    return { worker, sent, baseline }
+  }
+  private async observe(
+    worker: Worker,
+    sent: SentMessage,
+    baseline: z.infer<typeof SnapshotSchema>,
+    signal: AbortSignal,
+    write: (chunk: UIMessageChunk) => void,
+  ) {
+    const binding = worker.binding
+    const textId = randomUUID()
+    write({
+      type: 'start',
+      messageId: `paperclip-observer-${textId}`,
+    })
+    write({ type: 'text-start', id: textId })
+    write({
+      type: 'text-delta',
+      id: textId,
+      delta: `[Paperclip task](${baseline.taskUrl})\n\n`,
+    })
+    let displayed = ''
+    const until = Date.now() + 30 * 60_000
+    while (Date.now() < until) {
+      signal.throwIfAborted()
+      const snapshot = worker.snapshot
+      const run = snapshot?.run
+      if (run && run.id !== sent.oldRun) {
+        const output = binding.outputs?.[run.id]?.text ?? ''
+        if (output.startsWith(displayed) && output.length > displayed.length) {
+          write({
+            type: 'text-delta',
+            id: textId,
+            delta: output.slice(displayed.length),
+          })
+          displayed = output
+        }
+        if (
+          !activeStatuses.includes(run.status) &&
+          !snapshot?.liveRuns.length &&
+          binding.outputs?.[run.id]?.status === run.status
+        ) {
+          if (!displayed)
+            write({
+              type: 'text-delta',
+              id: textId,
+              delta: run.resultJson?.summary ?? `Paperclip run ${run.status}.`,
+            })
+          write({ type: 'text-end', id: textId })
+          write({ type: 'finish' })
+          return
+        }
+      }
+      await pause(signal, 500)
+    }
+    throw new Error(
+      'Task remains pending. Check scheduling or approvals in Paperclip.',
+    )
+  }
   stream(input: AcpAgentStreamInput): ReadableStream<UIMessageChunk> {
     const controller = new AbortController()
     const key = `${input.agent.id}:${input.conversationId}`
@@ -284,243 +679,34 @@ export class PaperclipAgentRuntime {
       : controller.signal
     return createUIMessageStream({
       originalMessages: input.messages,
-      onFinish: async ({ messages, isAborted }) =>
-        input.onFinish?.({ messages, isAborted: isAborted || signal.aborted }),
-      onError: (error) => {
-        this.active.delete(key)
-        return error instanceof Error
-          ? error.message
-          : 'Paperclip execution failed.'
-      },
+      onFinish: async () =>
+        input.onFinish?.({
+          messages:
+            this.state(input.conversationId)?.messages ?? input.messages,
+          isAborted: signal.aborted,
+        }),
+      onError: (error) =>
+        error instanceof Error ? error.message : 'Paperclip execution failed',
       execute: async ({ writer }) => {
-        let taskId: string | undefined, leaseId: string | undefined
-        let config = input.agent.paperclipConfig
-        if (!config) throw new Error('Paperclip connection is not configured.')
-        const polling = new AbortController()
-        let pollJob: Promise<void> | undefined
-        let pollError: unknown
-        const api = async (
-          path: string,
-          body?: unknown,
-          requestSignal: AbortSignal = signal,
-        ) => {
-          if (!config)
-            throw new Error('Paperclip connection is not configured.')
-          config = await freshPaperclipConfig(input.agent.id, config)
-          return paperclipRequest(config, path, body, requestSignal)
-        }
-        let outputId: string | undefined
-        const closeOutput = () => {
-          if (outputId) writer.write({ type: 'text-end', id: outputId })
-          outputId = undefined
-        }
-        const streamOutput = (delta: string) => {
-          if (!outputId) {
-            outputId = randomUUID()
-            writer.write({ type: 'text-start', id: outputId })
-          }
-          writer.write({ type: 'text-delta', id: outputId, delta })
-        }
-        const text = (value: string) => {
-          closeOutput()
-          const id = randomUUID()
-          writer.write({ type: 'text-start', id })
-          writer.write({ type: 'text-delta', id, delta: value })
-          writer.write({ type: 'text-end', id })
-        }
-        writer.write({ type: 'start', messageId: randomUUID() })
+        let worker: Worker | undefined
         try {
-          const latest = input.messages.findLast((m) => m.role === 'user')
-          const first = input.messages.find((m) => m.role === 'user')
-          const content = (message: typeof latest) =>
-            message?.parts
-              .flatMap((p) => (p.type === 'text' ? [p.text] : []))
-              .join('\n') ?? ''
-          const body = content(latest)
-          if (latest?.parts.some((part) => part.type === 'file'))
-            throw new Error(
-              'Paperclip conversations currently accept text. Add files directly to the linked Paperclip task.',
-            )
-          if (!body.trim() || !latest)
-            throw new Error('A text message is required.')
-          const { binding, save } = await loadBinding(
-            this.stateDir,
-            key,
-            input,
-            config,
-            content(first) || body,
-          )
-          if (!binding.taskId) {
-            const opened = z
-              .object({ task: z.object({ id: z.string().uuid() }) })
-              .parse(await api('/open', binding.request))
-            binding.taskId = String(opened.task.id)
-            await save(binding)
-          }
-          taskId = binding.taskId
-          const baseline = SnapshotSchema.parse(
-            await api(`/tasks/${taskId}/snapshot`),
-          )
-          if (baseline.taskUrl)
-            text(`[Paperclip task](${baseline.taskUrl})\n\n`)
-          binding.messages ??= {}
-          let sent = binding.messages[latest.id]
-          if (!sent) {
-            sent = {
-              requestId: randomUUID(),
-              body,
-              settings: {
-                modelId: input.agent.modelId ?? null,
-                reasoningEffort: input.agent.reasoningEffort ?? null,
-              },
-              oldRun: baseline.run?.id,
-              commentIds: baseline.comments.map((c) => c.id),
-            }
-            binding.messages[latest.id] = sent
-            await save(binding)
-          }
-          const seenComments = new Set(sent.commentIds)
-          const oldRun = sent.oldRun
-          const attached = z.object({ leaseId: z.string().uuid() }).parse(
-            await api(`/tasks/${taskId}/attach`, {
-              clientId: config.clientId,
-            }),
-          )
-          leaseId = String(attached.leaseId)
-          const pollSignal = AbortSignal.any([signal, polling.signal])
-          pollJob = (async () => {
-            while (!pollSignal.aborted) {
-              const { calls } = PollSchema.parse(
-                await api(`/leases/${leaseId}/poll`, {}, pollSignal),
-              )
-              for (const call of calls) {
-                pollSignal.throwIfAborted()
-                const request = call.request
-                const tool = request.method === 'tools/call'
-                if (tool)
-                  writer.write({
-                    type: 'tool-input-available',
-                    toolCallId: call.id,
-                    toolName: String(request.params?.name ?? ''),
-                    input: request.params?.arguments ?? {},
-                    dynamic: true,
-                  })
-                if (tool) closeOutput()
-                const result = await callLocalBrowser(
-                  this.serverPort,
-                  input,
-                  request,
-                  pollSignal,
-                )
-                if (tool) {
-                  if (result.error)
-                    writer.write({
-                      type: 'tool-output-error',
-                      toolCallId: call.id,
-                      errorText: String(result.error.message),
-                      dynamic: true,
-                    })
-                  else
-                    writer.write({
-                      type: 'tool-output-available',
-                      toolCallId: call.id,
-                      output: result.result,
-                      dynamic: true,
-                    })
-                }
-                await api(
-                  `/leases/${leaseId}/respond`,
-                  { callId: call.id, response: result },
-                  pollSignal,
-                )
-              }
-            }
-          })().catch((error) => {
-            if (!pollSignal.aborted) pollError = error
-          })
-          await api(`/tasks/${taskId}/send`, {
-            requestId: sent.requestId,
-            body: sent.body,
-            ...(sent.settings ? { settings: sent.settings } : {}),
-          })
-          let delivered = false
-          let logRunId: string | undefined
-          let logOffset = 0
-          const deadline = Date.now() + 30 * 60_000
-          while (Date.now() < deadline) {
-            signal.throwIfAborted()
-            if (pollError) throw pollError
-            const snapshot = SnapshotSchema.parse(
-              await api(`/tasks/${taskId}/snapshot?logOffset=${logOffset}`),
-            )
-            if (snapshot.run?.id !== logRunId) {
-              logRunId = snapshot.run?.id
-              logOffset = 0
-            } else if (snapshot.run?.id !== oldRun && snapshot.output) {
-              logOffset = snapshot.output.offset
-              if (snapshot.output.text) {
-                streamOutput(snapshot.output.text)
-                delivered = true
-              }
-            }
-            for (const comment of [...snapshot.comments].reverse()) {
-              if (seenComments.has(comment.id)) continue
-              seenComments.add(comment.id)
-              if (comment.authorAgentId && comment.body) {
-                text(String(comment.body))
-                delivered = true
-              }
-            }
-            const run = snapshot.run
-            if (
-              run &&
-              run.id !== oldRun &&
-              !['queued', 'running', 'scheduled_retry'].includes(run.status) &&
-              !snapshot.liveRuns.length
-            ) {
-              if (run.status !== 'succeeded')
-                throw new Error(
-                  `Paperclip run ${run.status}. Open task ${taskId} for details.`,
-                )
-              if (!delivered)
-                text(
-                  String(
-                    run.resultJson?.summary ?? `Task completed: ${taskId}`,
-                  ),
-                )
-              closeOutput()
-              writer.write({ type: 'finish' })
-              return
-            }
-            await new Promise<void>((resolve) => {
-              const timer = setTimeout(done, 1000)
-              function done() {
-                clearTimeout(timer)
-                signal.removeEventListener('abort', done)
-                resolve()
-              }
-              signal.addEventListener('abort', done, { once: true })
-            })
-          }
-          throw new Error(
-            `Paperclip task is still pending: ${taskId}. Check its approval or scheduling state.`,
+          const prepared = await this.prepareMessage(input, signal)
+          worker = prepared.worker
+          await this.observe(
+            worker,
+            prepared.sent,
+            prepared.baseline,
+            signal,
+            (chunk) => writer.write(chunk),
           )
         } finally {
-          closeOutput()
-          polling.abort()
-          await pollJob
-          if (signal.aborted && taskId)
-            await api(
-              `/tasks/${taskId}/stop`,
-              {},
-              AbortSignal.timeout(10_000),
-            ).catch(() => {})
-          if (leaseId)
-            await api(
-              `/leases/${leaseId}/detach`,
-              {},
-              AbortSignal.timeout(10_000),
-            ).catch(() => {})
+          if (
+            signal.aborted &&
+            (worker ?? this.workers.get(input.conversationId))
+          )
+            await this.control(input.conversationId, 'stop').catch(
+              () => undefined,
+            )
           this.active.delete(key)
         }
       },
