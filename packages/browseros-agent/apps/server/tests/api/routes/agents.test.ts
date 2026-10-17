@@ -80,6 +80,22 @@ describe('ACP agent routes', () => {
     expect((await store.get(AGENT_ID))?.paperclipConfig?.token).toBe(
       'private-access',
     )
+    const updated = await routes.request(`/${AGENT_ID}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ modelId: 'gpt-6-astra', reasoningEffort: 'high' }),
+    })
+    expect(updated.status).toBe(200)
+    const publicValue = await updated.text()
+    expect(publicValue).not.toContain('private-access')
+    expect(publicValue).not.toContain('private-refresh')
+    expect(JSON.parse(publicValue).agent).toMatchObject({
+      modelId: 'gpt-6-astra',
+      reasoningEffort: 'high',
+    })
+    expect((await store.get(AGENT_ID))?.paperclipConfig).toEqual(
+      paperclipConfig,
+    )
   })
 
   it('requires Paperclip configuration and rejects cleartext remote origins', async () => {
@@ -241,6 +257,9 @@ class MemoryAcpAgentStore implements AcpAgentStore {
       ...(input.modelId === undefined
         ? {}
         : { modelId: input.modelId ?? undefined }),
+      ...(input.reasoningEffort === undefined
+        ? {}
+        : { reasoningEffort: input.reasoningEffort ?? undefined }),
       ...(input.customConfig === undefined
         ? {}
         : { customConfig: input.customConfig }),

@@ -55,6 +55,7 @@ const TokensSchema = z.object({
 type SentMessage = {
   requestId: string
   body: string
+  settings?: { modelId: string | null; reasoningEffort: string | null }
   oldRun?: string
   commentIds: string[]
 }
@@ -93,10 +94,23 @@ export async function paperclipRequest(
         ? 'Reconnect your Paperclip account.'
         : `Paperclip request failed (${response.status}). Check the linked task before retrying.`,
     )
-  return response.json()
+  const result: unknown = await response.json()
+  const outcome = z
+    .object({
+      outcome: z.enum(['rejected', 'unknown']),
+      message: z.string().optional(),
+    })
+    .safeParse(result)
+  if (outcome.success)
+    throw new Error(
+      outcome.data.outcome === 'rejected'
+        ? `Paperclip rejected this message. ${outcome.data.message ?? 'Check the linked task.'}`
+        : 'Paperclip could not confirm this message. Check the linked task before sending another message.',
+    )
+  return result
 }
 
-async function freshConfig(
+export async function freshPaperclipConfig(
   agentId: string,
   fallback: PaperclipAgentConfig,
 ): Promise<PaperclipAgentConfig> {
@@ -292,7 +306,7 @@ export class PaperclipAgentRuntime {
         ) => {
           if (!config)
             throw new Error('Paperclip connection is not configured.')
-          config = await freshConfig(input.agent.id, config)
+          config = await freshPaperclipConfig(input.agent.id, config)
           return paperclipRequest(config, path, body, requestSignal)
         }
         let outputId: string | undefined
@@ -355,6 +369,10 @@ export class PaperclipAgentRuntime {
             sent = {
               requestId: randomUUID(),
               body,
+              settings: {
+                modelId: input.agent.modelId ?? null,
+                reasoningEffort: input.agent.reasoningEffort ?? null,
+              },
               oldRun: baseline.run?.id,
               commentIds: baseline.comments.map((c) => c.id),
             }
@@ -423,6 +441,7 @@ export class PaperclipAgentRuntime {
           await api(`/tasks/${taskId}/send`, {
             requestId: sent.requestId,
             body: sent.body,
+            ...(sent.settings ? { settings: sent.settings } : {}),
           })
           let delivered = false
           let logRunId: string | undefined

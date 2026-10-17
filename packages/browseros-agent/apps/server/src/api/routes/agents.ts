@@ -12,6 +12,10 @@ import {
 import { zValidator } from '@hono/zod-validator'
 import { Hono } from 'hono'
 import { z } from 'zod'
+import {
+  freshPaperclipConfig,
+  paperclipRequest,
+} from '../../lib/agents/acp/paperclip-agent-runtime'
 import type { AcpAgentDefinition } from '../../lib/agents/agent-types'
 import {
   type AcpAgentStore,
@@ -190,6 +194,20 @@ export function createAgentRoutes(
         { agent: publicAgent(await store.create(c.req.valid('json'))) },
         201,
       ),
+    )
+    .get(
+      '/:agentId/paperclip-connection',
+      zValidator('param', AgentIdParamsSchema),
+      async (c) => {
+        const agent = await store.get(c.req.valid('param').agentId)
+        if (!agent?.paperclipConfig)
+          return c.json({ error: 'Unknown Paperclip agent' }, 404)
+        const config = await freshPaperclipConfig(
+          agent.id,
+          agent.paperclipConfig,
+        )
+        return c.json(await paperclipRequest(config, '/connection'))
+      },
     )
     .get('/:agentId', zValidator('param', AgentIdParamsSchema), async (c) => {
       const agent = await store.get(c.req.valid('param').agentId)

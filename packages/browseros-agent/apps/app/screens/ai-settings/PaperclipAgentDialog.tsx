@@ -43,6 +43,8 @@ const schema = z.object({
   url: z.string().url(),
   name: z.string().min(1).max(80),
   remoteAgentId: z.string(),
+  modelId: z.string(),
+  reasoningEffort: z.string(),
 })
 type Device = {
   client_id: string
@@ -59,7 +61,14 @@ type Tokens = {
 }
 type Connection = {
   company: { name: string }
-  agents: Array<{ id: string; name: string; adapterType: string }>
+  agents: Array<{
+    id: string
+    name: string
+    adapterType: string
+    defaults?: { modelId: string; reasoningEffort: string | null }
+    reasoningEfforts?: string[]
+    models?: Array<{ id: string; label: string; reasoningEfforts: string[] }>
+  }>
 }
 
 export function PaperclipAgentDialog({
@@ -77,6 +86,8 @@ export function PaperclipAgentDialog({
       url: existingAgent?.paperclipConfig?.url ?? '',
       name: existingAgent?.name ?? 'Paperclip',
       remoteAgentId: existingAgent?.paperclipConfig?.remoteAgentId ?? '',
+      modelId: existingAgent?.modelId ?? '',
+      reasoningEffort: existingAgent?.reasoningEffort ?? '',
     },
   })
   const [device, setDevice] = useState<
@@ -130,21 +141,63 @@ export function PaperclipAgentDialog({
     refetchOnReconnect: false,
   })
   const connection = useQuery({
-    queryKey: [QUERY_KEYS.connection, device?.client_id],
-    queryFn: () =>
-      request<Connection>('connection', {
-        url: device?.url,
-        token: tokens.data?.access_token,
-      }),
-    enabled: Boolean(tokens.data?.access_token),
+    queryKey: [
+      QUERY_KEYS.connection,
+      baseUrl,
+      existingAgent?.id,
+      device?.client_id,
+    ],
+    queryFn: async (): Promise<Connection> => {
+      if (tokens.data?.access_token)
+        return request<Connection>('connection', {
+          url: device?.url,
+          token: tokens.data.access_token,
+        })
+      const response = await fetch(
+        `${baseUrl}/agents/${existingAgent?.id}/paperclip-connection`,
+      )
+      if (!response.ok)
+        throw new Error(
+          'Unable to load Paperclip models. Reconnect your account if authorization expired.',
+        )
+      return response.json()
+    },
+    enabled:
+      open &&
+      Boolean(baseUrl) &&
+      (Boolean(tokens.data?.access_token) || Boolean(existingAgent && !device)),
     retry: false,
     gcTime: 0,
   })
+  const remote = connection.data?.agents.find(
+    (a) => a.id === form.watch('remoteAgentId'),
+  )
+  const modelId = form.watch('modelId')
+  const efforts =
+    (modelId
+      ? remote?.models?.find((m) => m.id === modelId)?.reasoningEfforts
+      : remote?.reasoningEfforts) ?? []
   const save = form.handleSubmit(async (values) => {
-    if (!device || !tokens.data?.access_token || !values.remoteAgentId) return
+    if (!values.remoteAgentId) return
+    const settings = {
+      modelId: values.modelId || null,
+      reasoningEffort: values.reasoningEffort || null,
+    }
+    if (existingAgent && !device) {
+      await update.mutateAsync({
+        agentId: existingAgent.id,
+        patch: { name: values.name, ...settings },
+      })
+      onOpenChange(false)
+      onSaved?.(existingAgent.id)
+      return
+    }
+    if (!device || !tokens.data?.access_token) return
     const value = {
       name: values.name,
       type: 'paperclip' as const,
+      modelId: values.modelId || undefined,
+      reasoningEffort: values.reasoningEffort || undefined,
       paperclipConfig: {
         url: device.url,
         token: tokens.data.access_token,
@@ -160,7 +213,11 @@ export function PaperclipAgentDialog({
     const agent = existingAgent
       ? await update.mutateAsync({
           agentId: existingAgent.id,
-          patch: { name: value.name, paperclipConfig: value.paperclipConfig },
+          patch: {
+            name: value.name,
+            paperclipConfig: value.paperclipConfig,
+            ...settings,
+          },
         })
       : await create.mutateAsync(value)
     onOpenChange(false)
@@ -174,9 +231,11 @@ export function PaperclipAgentDialog({
     update.error
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent className="max-h-[85vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>Connect Paperclip</DialogTitle>
+          <DialogTitle>
+            {existingAgent ? 'Edit Paperclip agent' : 'Connect Paperclip'}
+          </DialogTitle>
           <DialogDescription>
             Run an agent in Paperclip and let it use this browser. Each
             conversation creates a task; follow-up messages continue that task.
@@ -192,6 +251,7 @@ export function PaperclipAgentDialog({
                   <FormLabel>Paperclip URL</FormLabel>
                   <FormControl>
                     <Input
+                      disabled={Boolean(existingAgent && !device)}
                       placeholder="https://paperclip.example.com"
                       {...field}
                     />
@@ -207,7 +267,7 @@ export function PaperclipAgentDialog({
               }}
               disabled={connect.isPending}
             >
-              Connect account
+              {existingAgent ? 'Reconnect account' : 'Connect account'}
             </Button>
             {device && !tokens.data?.access_token ? (
               <p className="text-sm">
@@ -249,6 +309,12 @@ export function PaperclipAgentDialog({
                         <select
                           className="w-full rounded border bg-background p-2"
                           {...field}
+                          disabled={Boolean(existingAgent && !device)}
+                          onChange={(event) => {
+                            field.onChange(event)
+                            form.setValue('modelId', '')
+                            form.setValue('reasoningEffort', '')
+                          }}
                         >
                           <option value="">Choose an agent</option>
                           {connection.data?.agents.map((agent) => (
@@ -262,6 +328,76 @@ export function PaperclipAgentDialog({
                     </FormItem>
                   )}
                 />
+                <FormField
+                  control={form.control}
+                  name="modelId"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Model</FormLabel>
+                      <FormControl>
+                        <select
+                          className="w-full rounded border bg-background p-2"
+                          {...field}
+                          disabled={!remote}
+                          onChange={(event) => {
+                            field.onChange(event)
+                            form.setValue('reasoningEffort', '')
+                          }}
+                        >
+                          <option value="">
+                            Agent default
+                            {remote?.defaults?.modelId
+                              ? ` (${remote.defaults.modelId})`
+                              : ''}
+                          </option>
+                          {field.value &&
+                          !remote?.models?.some((m) => m.id === field.value) ? (
+                            <option value={field.value}>{field.value}</option>
+                          ) : null}
+                          {remote?.models?.map((model) => (
+                            <option key={model.id} value={model.id}>
+                              {model.label}
+                            </option>
+                          ))}
+                        </select>
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="reasoningEffort"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Reasoning effort</FormLabel>
+                      <FormControl>
+                        <select
+                          className="w-full rounded border bg-background p-2"
+                          {...field}
+                          disabled={!efforts.length}
+                        >
+                          <option value="">Agent default</option>
+                          {field.value && !efforts.includes(field.value) ? (
+                            <option value={field.value} disabled>
+                              {field.value} (unsupported)
+                            </option>
+                          ) : null}
+                          {efforts.map((effort) => (
+                            <option key={effort} value={effort}>
+                              {effort}
+                            </option>
+                          ))}
+                        </select>
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <p className="text-muted-foreground text-sm">
+                  Applies to the next message in your BrowserOS tasks. The
+                  remote agent's defaults stay unchanged.
+                </p>
               </>
             ) : null}
             {error ? (
@@ -279,12 +415,12 @@ export function PaperclipAgentDialog({
                 disabled={
                   !connection.data ||
                   !form.watch('remoteAgentId') ||
-                  create.isPending
+                  create.isPending ||
+                  update.isPending ||
+                  Boolean(device && !tokens.data?.access_token)
                 }
               >
-                {existingAgent
-                  ? 'Reconnect Paperclip agent'
-                  : 'Add Paperclip agent'}
+                {existingAgent ? 'Save changes' : 'Add Paperclip agent'}
               </Button>
             </DialogFooter>
           </form>

@@ -10,7 +10,7 @@ const cleanup: Array<() => unknown> = []
 afterEach(async () => {
   for (const stop of cleanup.splice(0)) await stop()
 })
-async function fixture() {
+async function fixture(outcome?: 'rejected' | 'unknown') {
   const dir = await mkdtemp(join(tmpdir(), 'paperclip-runtime-'))
   cleanup.push(() => rm(dir, { recursive: true, force: true }))
   const tasks = new Map<string, { run: string | null; receipts: Set<string> }>()
@@ -73,6 +73,8 @@ async function fixture() {
       const task = tasks.get(path.split('/')[2])
       if (!task) return new Response('', { status: 404 })
       if (path.endsWith('/send')) {
+        if (outcome)
+          return Response.json({ outcome, message: 'Task state conflict' })
         const message = (await request.json()) as {
           requestId: string
           body: string
@@ -206,4 +208,55 @@ describe('Paperclip native conversation runtime', () => {
     ).toBe(true)
     expect(f.stats().opens).toBe(1)
   })
+  it('freezes settings on retries and applies edits to the next message on the same task', async () => {
+    const f = await fixture()
+    f.input.agent.modelId = 'gpt-6-astra'
+    f.input.agent.reasoningEffort = 'high'
+    await f.read(f.runtime())
+    expect(f.sent[0]).toMatchObject({
+      settings: { modelId: 'gpt-6-astra', reasoningEffort: 'high' },
+    })
+    f.input.agent.modelId = 'gpt-6-luna'
+    f.input.agent.reasoningEffort = 'low'
+    await f.read(f.runtime())
+    expect(f.sent[1]).toEqual(f.sent[0])
+    f.input.messages.push({
+      id: 'new-settings',
+      role: 'user',
+      parts: [{ type: 'text', text: 'Continue with new settings' }],
+    })
+    await f.read(f.runtime())
+    expect(f.sent[2]).toMatchObject({
+      settings: { modelId: 'gpt-6-luna', reasoningEffort: 'low' },
+    })
+    expect(f.stats().opens).toBe(1)
+    f.input.agent.modelId = undefined
+    f.input.agent.reasoningEffort = undefined
+    f.input.messages.push({
+      id: 'default-settings',
+      role: 'user',
+      parts: [{ type: 'text', text: 'Use defaults' }],
+    })
+    await f.read(f.runtime())
+    expect(f.sent[3]).toMatchObject({
+      settings: { modelId: null, reasoningEffort: null },
+    })
+  })
+  it.each(['rejected', 'unknown'] as const)(
+    'surfaces a %s receipt without waiting for a run',
+    async (outcome) => {
+      const f = await fixture(outcome)
+      const chunks = await f.read(f.runtime())
+      expect(
+        chunks.some(
+          (c) =>
+            c.type === 'error' &&
+            c.errorText.includes(
+              outcome === 'rejected' ? 'rejected' : 'could not confirm',
+            ),
+        ),
+      ).toBe(true)
+      expect([...f.tasks.values()][0].run).toBeNull()
+    },
+  )
 })
