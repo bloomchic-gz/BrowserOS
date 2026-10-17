@@ -35,22 +35,57 @@ The local service is the single writer for the Paperclip transcript. It reconcil
 
 A remote tool call gets a short-lived local lease pinned to its exact remote Run. An authorization check precedes dispatch, and a watchdog cancels local work after remote revocation. Losing a poll or response never automatically repeats the action. A service restart restores the connection and transcript, not uncertain in-flight tool outcomes. Legacy saved bindings from before persistent connections become enabled on their next local message.
 
+## Architecture at a glance
+
+The Task is the shared record, the remote Agent owns reasoning and Task execution, and BrowserOS owns the local browser. The background service persists beyond an individual chat turn; Agent Runs are still admitted and scheduled normally. Solid edges show data/call flow and dotted edges show instruction delivery.
+
 ```mermaid
-flowchart LR
-  U[Team member in Paperclip] --> T[One Task per conversation]
-  B[BrowserOS chat] -->|message receipt| T
-  T --> S[Normal scheduler and permissions]
-  S --> A[Remote Codex or Claude]
-  A -->|Run-scoped MCP| Q[Paperclip browser broker]
-  D[BrowserOS background service] -->|outbound long poll| Q
-  Q -->|tool request| D
-  D -->|call-scoped local lease| L[Local browser tools]
-  L -->|result| D
-  D -->|result| Q
-  D -->|reconcile comments and output| T
-  D --> C[Local conversation store]
-  C --> B
+flowchart TB
+  Team[Authorized teammate]
+  subgraph PC[Paperclip - tasks and remote execution]
+    Task[(Shared Task - comments and status)]
+    Scheduler[Normal admission and scheduling]
+    Agent[Remote Codex or Claude - per Run]
+    Contract[Bound-Task instructions]
+    Broker[Browser broker - leases and call queue]
+    Task --> Scheduler --> Agent
+    Task -. durable binding check .-> Contract
+    Contract -. every ACP turn .-> Agent
+    Agent -->|result comment and status| Task
+    Agent <-->|Run-scoped HTTP MCP| Broker
+  end
+  subgraph BO[BrowserOS - user computer]
+    Chat[Chat and connection controls]
+    Background[Persistent background service]
+    MCP[Local MCP - Run and read-only guards]
+    Browser[Real signed-in browser]
+    Rules[Canonical BrowserOS ACP instructions]
+    Chat -->|send and control| Background
+    Background -->|messages and connection state| Chat
+    Background <-->|local tool lease| MCP
+    MCP <-->|observe - act - verify| Browser
+    Rules -. MCP initialization .-> MCP
+  end
+  Team -->|comment and resume| Task
+  Background -->|open Task or send message| Task
+  Task -->|polled comments and run output| Background
+  Background <-->|outbound long poll and results| Broker
 ```
+
+All browser transport requests originate from the user's computer. The bidirectional edge represents request/result flow, not an inbound public connection to BrowserOS. MCP initialization instructions follow the same local MCP → background service → broker → Agent return path.
+
+The background service runs two independent loops: browser attachment/long-poll dispatch and full paginated comment reconciliation with incremental run output. The latter waits about two seconds between passes. Stable message/request IDs prevent echo loops; synchronized comments never resubmit themselves. Formal Task comments replace provisional output for the same Run.
+
+| Event | Browser control | Transcript and recovery |
+| --- | --- | --- |
+| Turn completes or chat view closes | Background connection stays available | Synchronization continues |
+| Pause remote control | Detach and abort local calls | Synchronization continues; resume before a new local send |
+| Stop task | Cancel queued/running/retry Runs and revoke their access | Connection and synchronization remain for future messages |
+| BrowserOS service disconnects | A lease can expire; old Run capabilities then fail | Reconnect and reconcile on recovery; never blindly replay uncertain actions |
+| Paperclip process restarts | In-memory leases and pending calls are lost | Durable Tasks remain; BrowserOS attaches again |
+
+Task-scoped collaboration/disconnection/result instructions are included in every ACP turn, including resumed and offline turns. Canonical BrowserOS operation instructions are delivered when the remote MCP initializes. These are ACP turn and MCP initialization instructions, not new provider-native system messages. Prompt scope and tool authority are separate: the durable binding selects the contract, while a live lease plus active Run authorizes browser execution.
+
 
 Team verification on the independent local instance exercised a different operator account, browser tab creation after foreground completion, both transcripts, paused control with continuing message sync, task cancellation, and restored connections. Production/browser binary installation is separate from these source changes.
 
