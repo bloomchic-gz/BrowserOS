@@ -21,6 +21,7 @@ import {
   MessagesSchema,
   PollSchema,
   paperclipRequest,
+  parseBinding,
   type SentMessage,
   SnapshotSchema,
 } from './paperclip-client'
@@ -102,9 +103,9 @@ export class PaperclipAgentRuntime {
     for (const name of await readdir(this.stateDir)) {
       if (!name.endsWith('.json')) continue
       try {
-        const binding: PersistentBinding = JSON.parse(
-          await readFile(join(this.stateDir, name), 'utf8'),
-        )
+        const binding = parseBinding(
+          JSON.parse(await readFile(join(this.stateDir, name), 'utf8')),
+        ) as PersistentBinding
         if (
           !binding.agentId ||
           !binding.taskId ||

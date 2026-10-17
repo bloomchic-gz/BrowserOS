@@ -66,9 +66,12 @@ type Connection = {
     name: string
     adapterType: string
     defaults?: { modelId: string; reasoningEffort: string | null }
+    capabilities?: { customModel?: boolean; modelSelection?: boolean }
+    customModelReasoningEfforts?: string[]
     reasoningEfforts?: string[]
     models?: Array<{ id: string; label: string; reasoningEfforts: string[] }>
   }>
+  unavailableAgents?: Array<{ id: string; name: string; reason: string }>
 }
 
 export function PaperclipAgentDialog({
@@ -175,10 +178,11 @@ export function PaperclipAgentDialog({
   const modelId = form.watch('modelId')
   const efforts =
     (modelId
-      ? remote?.models?.find((m) => m.id === modelId)?.reasoningEfforts
+      ? (remote?.models?.find((m) => m.id === modelId)?.reasoningEfforts ??
+        remote?.customModelReasoningEfforts)
       : remote?.reasoningEfforts) ?? []
   const save = form.handleSubmit(async (values) => {
-    if (!values.remoteAgentId) return
+    if (!values.remoteAgentId || !remote) return
     const settings = {
       modelId: values.modelId || null,
       reasoningEffort: values.reasoningEffort || null,
@@ -328,6 +332,18 @@ export function PaperclipAgentDialog({
                     </FormItem>
                   )}
                 />
+                {connection.data.unavailableAgents?.length ? (
+                  <details className="text-muted-foreground text-sm">
+                    <summary>Other agents and connection requirements</summary>
+                    <ul>
+                      {connection.data.unavailableAgents.map((agent) => (
+                        <li key={agent.id}>
+                          {agent.name}: {agent.reason}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                ) : null}
                 <FormField
                   control={form.control}
                   name="modelId"
@@ -338,7 +354,10 @@ export function PaperclipAgentDialog({
                         <select
                           className="w-full rounded border bg-background p-2"
                           {...field}
-                          disabled={!remote}
+                          disabled={
+                            !remote ||
+                            remote.capabilities?.modelSelection === false
+                          }
                           onChange={(event) => {
                             field.onChange(event)
                             form.setValue('reasoningEffort', '')
@@ -365,6 +384,32 @@ export function PaperclipAgentDialog({
                     </FormItem>
                   )}
                 />
+                {remote?.capabilities?.customModel ? (
+                  <FormField
+                    control={form.control}
+                    name="modelId"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Model ID (optional)</FormLabel>
+                        <FormControl>
+                          <Input
+                            {...field}
+                            placeholder="Leave blank for agent default"
+                            onChange={(event) => {
+                              field.onChange(event)
+                              form.setValue('reasoningEffort', '')
+                            }}
+                          />
+                        </FormControl>
+                        <p className="text-muted-foreground text-sm">
+                          Use a model supported by the remote agent when it is
+                          not in the list.
+                        </p>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                ) : null}
                 <FormField
                   control={form.control}
                   name="reasoningEffort"
@@ -414,7 +459,7 @@ export function PaperclipAgentDialog({
                 type="submit"
                 disabled={
                   !connection.data ||
-                  !form.watch('remoteAgentId') ||
+                  !remote ||
                   create.isPending ||
                   update.isPending ||
                   Boolean(device && !tokens.data?.access_token)

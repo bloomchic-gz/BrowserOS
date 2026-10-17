@@ -1,6 +1,3 @@
-import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
 import type { PaperclipAgentConfig } from '@browseros/shared/schemas/agent'
 import { z } from 'zod'
 import { BROWSEROS_TOOL_LEASE_HEADER } from '../../browser-tool-lease'
@@ -8,7 +5,6 @@ import { BROWSEROS_TOOL_LEASE_HEADER } from '../../browser-tool-lease'
 import { DbAcpAgentStore } from '../storage/acp-agent-store'
 import type { AcpAgentStreamInput } from './acp-agent-runtime'
 
-type Json = Record<string, unknown>
 export const CommentSchema = z.object({
   id: z.string(),
   body: z.string(),
@@ -62,19 +58,14 @@ const TokensSchema = z.object({
   refresh_token: z.string().min(1),
   expires_in: z.number().positive(),
 })
-export type SentMessage = {
-  requestId: string
-  body: string
-  settings?: { modelId: string | null; reasoningEffort: string | null }
-  oldRun?: string
-  commentIds: string[]
-}
-export type Binding = {
-  identity: string
-  request: Json
-  taskId?: string
-  messages?: Record<string, SentMessage>
-}
+
+export {
+  type Binding,
+  loadBinding,
+  parseBinding,
+  type SentMessage,
+} from './paperclip-binding'
+
 const refreshes = new Map<string, Promise<PaperclipAgentConfig>>()
 
 export async function paperclipRequest(
@@ -214,57 +205,4 @@ export async function callLocalBrowser(
     }
   }
   return result
-}
-
-export async function loadBinding(
-  stateDir: string,
-  key: string,
-  input: AcpAgentStreamInput,
-  config: PaperclipAgentConfig,
-  title: string,
-) {
-  const identity = `${new URL(config.url).origin}:${config.clientId}:${config.remoteAgentId}`
-  const filename = join(
-    stateDir,
-    `${createHash('sha256').update(key).digest('hex')}.json`,
-  )
-  await mkdir(stateDir, { recursive: true, mode: 0o700 })
-  let saves: Promise<void> = Promise.resolve()
-  const save = (binding: Binding) => {
-    const content = JSON.stringify(binding)
-    const next = saves.then(async () => {
-      const tmp = `${filename}.${randomUUID()}.tmp`
-      await writeFile(tmp, content, { mode: 0o600 })
-      await rename(tmp, filename)
-    })
-    saves = next.catch(() => undefined)
-    return next
-  }
-  let binding: Binding
-  try {
-    binding = JSON.parse(await readFile(filename, 'utf8'))
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-    binding = {
-      identity,
-      request: {
-        requestId: randomUUID(),
-        conversationId: input.conversationId,
-        clientId: config.clientId,
-        agentId: config.remoteAgentId,
-        title: (
-          title.match(/<USER_QUERY>\s*([\s\S]*?)<\/USER_QUERY>/)?.[1] ?? title
-        )
-          .trim()
-          .slice(0, 200),
-      },
-    }
-    await save(binding)
-  }
-  if (binding.identity !== identity)
-    throw new Error(
-      'This conversation belongs to another Paperclip connection. Start a new conversation.',
-    )
-
-  return { binding, save }
 }
