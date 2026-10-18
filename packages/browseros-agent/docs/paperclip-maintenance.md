@@ -178,3 +178,12 @@ BrowserToolAccess 拆分后的当轮验证与首次失败记录见 Paperclip `te
 ## Paperclip 侧 Machine 工作区策略
 
 配套 Paperclip 已新增 `server/src/services/heartbeat/machine-workspace-policy.ts`：集中 Machine 使用限制、远端源、空控制端配置和工作区描述。Runner 仍负责远端目录校验；heartbeat 原流程负责 Task 绑定、租约获取、远程分派、Stop 与恢复。BrowserOS 的连接、消息同步、BrowserToolAccess 和网络协议保持不变。当前验证见 Paperclip `tests/browseros-machine-acceptance/machine-workspace-policy-validation-2026-10-18.md`。
+
+
+## Paperclip 侧 Machine 分派接口
+
+配套 Paperclip 的 `server/src/services/heartbeat/adapter-dispatch.ts` 现在统一选择 Machine 或本地执行。它使用当前 Run 已准备的环境与租约，在原最终授权检查内创建执行接口；Machine 错误直接交回原生命周期，不回退到本机执行。Runner 负责远端 Agent，Paperclip 继续负责调度、Stop、租约与恢复，BrowserOS 继续通过常驻连接回传浏览器工具结果。
+
+本轮调整 Paperclip 内部分派接入，并补齐数据库故障掩盖 Machine 断线时的未知结果保护；BrowserOS 的绑定、团队消息、暂停/Stop、BrowserToolAccess 和协议没有改动。真实 Codex、故障与硬重启的当轮结果见 Paperclip `tests/browseros-machine-acceptance/machine-dispatch-validation-2026-10-19.md`。
+
+已分派的绑定 Machine Task 若以通用 `adapter_failed` 结束且没有启动前失败证据，Paperclip 不自动重试浏览器动作；连接恢复、旧执行确认停止后，用户在任一端发新消息继续。普通任务和明确限流仍沿原重试策略。
