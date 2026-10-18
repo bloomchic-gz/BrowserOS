@@ -81,7 +81,7 @@ node tests/browseros-machine-acceptance/run.mjs --run /absolute/private/config.j
 
 配置中的 BrowserOS Agent 必须指向同一独立 Paperclip 测试实例和 Machine 上的被测 Agent；不要把真实日常账号/生产实例当测试夹具。每次运行新建 conversation/Task，并使用独立报告目录，不依赖旧 Task ID。测试结束暂停本次连接并保留证据和测试页，便于审查；不修改全局 Agent 设置，不停止共享服务。
 
-自动 live 覆盖建 Task、团队继续、真实 ACP 浏览器工具、暂停恢复、本地继续、Stop、普通 Task 隔离和双端结果。UI 模型选择和数据库迁移另有验收责任，不能由这个 live 成功替代。断网、poll/result/ack 丢失、后台与工具转发进程 SIGKILL、暂停后重启已有 `tests/browseros-machine-acceptance/faults/run.mjs` 独立夹具，可指定 `--cdp` 在专用页面计数。完整 Paperclip 服务/数据库与整个浏览器应用硬重启仍未覆盖。具体命令、首次失败和最终证据见 Paperclip `tests/browseros-machine-acceptance/faults/README.md` 与同目录验证记录。
+自动 live 覆盖建 Task、团队继续、真实 ACP 浏览器工具、暂停恢复、本地继续、Stop、普通 Task 隔离和双端结果。UI 模型选择和数据库迁移另有验收责任，不能由这个 live 成功替代。断网、poll/result/ack 丢失、后台与工具转发进程 SIGKILL、暂停后重启已有 `tests/browseros-machine-acceptance/faults/run.mjs` 独立夹具，可指定 `--cdp` 在专用页面计数。完整 Paperclip 服务、PostgreSQL 及两者同时硬重启，Runner CLI 被 SIGKILL 后的进程回收现已通过独立实例验收，见 Paperclip `tests/browseros-machine-acceptance/hard-restart-validation-2026-10-18.md`。整个浏览器应用硬重启仍未覆盖。具体命令、首次失败和最终证据见 Paperclip `tests/browseros-machine-acceptance/faults/README.md` 与同目录验证记录。
 
 BrowserOS 现有回归入口包括：
 
@@ -93,3 +93,24 @@ BrowserOS 现有回归入口包括：
 - `apps/server/tests/api/routes/agents.test.ts`
 
 更新上游前记录两仓 commit、Runner 和 provider bridge 版本。更新后先检查上述接入边界，再跑相关回归与 live；保留首次失败，不能仅保存最后一次成功。只有当实际开始 UI 重构时才调整渲染层测试，外部行为标准保持不变。
+
+## 应用工作区构建与类型检查
+
+在 `packages/browseros-agent` 中执行。除 Bun 外，Rust 工作区还需要 Cargo 和本机链接器；最低 Rust 版本以根 `Cargo.toml` 的 `rust-version` 为准。
+
+```sh
+bun run typecheck
+cargo check --workspace --locked
+cargo build --workspace --locked
+bun run build:server:ci
+bun run build:agent
+bun run --filter @browseros/claw-app build
+bun run build:app-onboard
+bun run build:claw-onboard
+```
+
+`build:server:ci` 只生成本地产物，不上传 R2，也不要求生产密钥。扩展构建前不要配置 `SENTRY_AUTH_TOKEN`，以免启用 sourcemap 上传。其余默认发布脚本可能上传资源，不能当成本地验收的等价命令。
+
+这组检查覆盖应用工作区的 TypeScript、Rust、本机原生程序、服务端打包、扩展及引导页；不代表 Chromium 浏览器内核源码构建、跨平台运行或真实 Agent 端到端验收。2026-10-18 的两仓执行结果及环境版本统一记录在 Paperclip `tests/browseros-machine-acceptance/workspace-validation-2026-10-18.md`。
+
+Paperclip 的 14 个 BrowserOS HTTP 操作现已纳入 OpenAPI 覆盖检查。后续改动请求体时维护 `server/src/services/browseros/http-contract.ts`，实际 handler 与 `server/src/routes/browseros-openapi.ts` 共用该契约；规范必须区分个人 OAuth、Run 浏览器能力令牌和仅返回 405 的 MCP GET/DELETE，不能用普通 Agent API key 的描述替代。
