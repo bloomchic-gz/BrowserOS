@@ -16,18 +16,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { killBrowser, spawnBrowser } from './__helpers__/browser'
 
-async function waitForFile(path: string): Promise<void> {
-  for (let attempt = 0; attempt < 50; attempt++) {
-    if (existsSync(path)) {
-      return
-    }
-    await new Promise((resolve) => setTimeout(resolve, 10))
-  }
-  throw new Error(`timed out waiting for ${path}`)
-}
-
 /** Runs the real spawn path and returns argv captured by a fake browser binary. */
-async function captureBrowserArgs(headless: boolean): Promise<string[]> {
+async function captureBrowserArgs(
+  headless: boolean,
+  delayedStartup = false,
+): Promise<string[]> {
   const tempDir = mkdtempSync(join(tmpdir(), 'browseros-launch-args-'))
   const argsPath = join(tempDir, 'args.txt')
   const binaryPath = join(tempDir, 'browseros-fake')
@@ -35,6 +28,7 @@ async function captureBrowserArgs(headless: boolean): Promise<string[]> {
     binaryPath,
     [
       '#!/bin/sh',
+      ...(delayedStartup ? ['sleep 1'] : []),
       'args_file="$BROWSEROS_TEST_ARGS_FILE.tmp"',
       ': > "$args_file"',
       'for arg in "$@"; do',
@@ -47,6 +41,11 @@ async function captureBrowserArgs(headless: boolean): Promise<string[]> {
   chmodSync(binaryPath, 0o755)
 
   const cdpServer = createServer((_request, response) => {
+    // Readiness must come from the child, not merely the fixture HTTP listener.
+    if (!existsSync(argsPath)) {
+      response.writeHead(503).end()
+      return
+    }
     response.writeHead(200, { 'content-type': 'application/json' })
     response.end('{"Browser":"BrowserOS"}')
   })
@@ -69,7 +68,6 @@ async function captureBrowserArgs(headless: boolean): Promise<string[]> {
       extraArgs: [],
     })
 
-    await waitForFile(argsPath)
     return readFileSync(argsPath, 'utf8').split('\n')
   } finally {
     if (originalArgsFile === undefined) {
@@ -91,7 +89,7 @@ describe('spawnBrowser', () => {
   })
 
   it('uses the dev dock icon without a headless flag in headed mode', async () => {
-    const args = await captureBrowserArgs(false)
+    const args = await captureBrowserArgs(false, true)
 
     expect(args).toContain('--browseros-dock-icon=dev')
     expect(args).not.toContain('--headless=new')
