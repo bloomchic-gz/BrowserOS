@@ -1,12 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import type { PaperclipAgentConfig } from '@browseros/shared/schemas/agent'
 import { z } from 'zod'
-import type { BrowserToolLease } from '../../../api/services/mcp/browser-mcp-module'
 import type { Binding, SentMessage } from './paperclip-binding'
 import type { BindingStore } from './paperclip-binding-store'
 import {
   type CommentSchema,
-  callLocalBrowser,
   MessagesSchema,
   PollSchema,
   paperclipRequest,
@@ -20,6 +18,7 @@ import {
 } from './paperclip-conversation'
 import type {
   AgentConfigProvider,
+  BrowserToolAccess,
   PaperclipTurnEvent,
   PaperclipTurnInput,
   PaperclipScope as Scope,
@@ -50,11 +49,7 @@ type Worker = {
   syncController?: AbortController
 }
 export interface PaperclipConnectionDeps {
-  createToolLease: (
-    scope: Scope,
-    runId: string,
-    signal: AbortSignal,
-  ) => BrowserToolLease
+  browserTools: BrowserToolAccess
   bindingStore: BindingStore
   conversationSink: ConversationSink
   agentConfigs: AgentConfigProvider
@@ -79,10 +74,7 @@ export class PaperclipConnectionRuntime {
   private active = new Map<string, AbortController>()
   private readonly bindings: BindingStore
   private readonly conversations: ConversationSink
-  constructor(
-    private serverPort: number,
-    private deps: PaperclipConnectionDeps,
-  ) {
+  constructor(private deps: PaperclipConnectionDeps) {
     this.bindings = deps.bindingStore
     this.conversations = deps.conversationSink
   }
@@ -198,13 +190,11 @@ export class PaperclipConnectionRuntime {
               const controller = new AbortController()
               worker.call = controller
               const callSignal = AbortSignal.any([signal, controller.signal])
-              const lease = this.deps.createToolLease(
+              const tools = this.deps.browserTools.acquire(
                 worker.binding,
                 call.runId,
                 callSignal,
               )
-              if (!lease)
-                throw new Error('Persistent browser tools are not configured.')
               // Revocation must also abort a long-running local tool, even if a
               // different run has already started on this Task.
               const watchdog = (async () => {
@@ -224,12 +214,7 @@ export class PaperclipConnectionRuntime {
                 }
               })()
               try {
-                const response = await callLocalBrowser(
-                  this.serverPort,
-                  { ...worker.binding, browserToolLeaseToken: lease.token },
-                  call.request,
-                  callSignal,
-                )
+                const response = await tools.call(call.request)
                 await this.api(
                   worker,
                   `/leases/${worker.leaseId}/respond`,
@@ -237,7 +222,7 @@ export class PaperclipConnectionRuntime {
                   signal,
                 )
               } finally {
-                lease.revoke()
+                tools.release()
                 controller.abort()
                 await watchdog
                 worker.call = undefined

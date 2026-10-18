@@ -85,7 +85,34 @@ flowchart TB
 
 以后上游变更 Agent 数据库、UI 消息或聊天流接口时，优先调整对应适配层；连接核心和原有验收保持稳定。业务源码仅调整自有集成文件，没有增加对 ACP 分派、HTTP 路由、UI 组件的补丁。本轮没有数据迁移、wire 协议变化或新增调度器。
 
-这是仓库内接口，不是稳定公开插件 API。BrowserToolAccess 仍待后续单独提取；消息同步仍为全量分页，仍使用现有 AI SDK 渲染，未改成新的增量消息协议。
+这是仓库内接口，不是稳定公开插件 API。BrowserToolAccess 已按下面的边界提取；消息同步仍为全量分页，仍使用现有 AI SDK 渲染，未改成新的增量消息协议。
+
+## 浏览器工具边界
+
+`paperclip-runtime-ports.ts` 的 `BrowserToolAccess.acquire(scope, runId, signal)` 返回一个只有 `call(request)` 和 `release()` 的本机工具句柄。`paperclip-browser-tool-access.ts` 的 `LocalMcpBrowserToolAccess` 适配现有 BrowserMcpModule 租约工厂与 loopback `/mcp`；本机端口、租约 token/请求头、只读 query、JSON/SSE 解析和 25 秒 HTTP 超时只留在适配器。
+
+`PaperclipAgentRuntime` 默认装配这个适配器，保留原 `createToolLease` 注入口、构造参数和路由接线，也允许注入完整 `browserTools`。内部连接核心构造方法只接收依赖，不再接收 serverPort、导入 BrowserToolLease 或直接调用本机 MCP。上游路由、BrowserMcpModule 和普通 ACP 路径没有改动。
+
+```mermaid
+flowchart LR
+  P["Paperclip<br/>远端租约 / 工具请求"] <--> R["连接核心<br/>检查、撤销监听、暂停 / Stop、回传"]
+  R -->|acquire / call / release| A["BrowserToolAccess"]
+  A --> L["LocalMcpBrowserToolAccess<br/>本机 token、HTTP、JSON / SSE"]
+  L -->|创建 / 撤销本机租约| M["现有 BrowserMcpModule"]
+  L <-->|loopback /mcp| M
+  M <--> B["现有浏览器工具"]
+```
+
+必须保留的调用顺序和接口约定：
+
+1. **先查远端授权**，再创建本机工具租约。远端拒绝时不能取得本机权限。
+2. `scope`、remote run ID 和取消 signal 原样进入现有租约工厂，保留只读上限、浏览器上下文和 Run 执行守卫。本机 token 不进入核心状态、存储或 Paperclip 请求。
+3. 核心继续每秒检查当次远端 call 是否有效；即使另一个 Run 仍活跃，当次 call 被撤销也必须取消。不能仅依赖 Task snapshot 的“仍有 live run”。
+4. 正常调用先回传工具结果，回传成功或失败后都在 finally 中 `release()`，再结束撤销监听。`release()` 应同步撤销本机租约且不抛错；取消执行靠传入的 signal，不把删除 token 当成停止已有调用。
+5. 暂停和 shutdown 取消本机调用及连接，等待释放后 detach；Stop 取消当前调用并停止远端 Run，保持连接启用。前台自然结束不关闭后台。
+6. 本机 HTTP/解析/取消错误继续转换为原 JSON-RPC `-32000` 错误，保留 request ID；正常 MCP 错误原样回传。SSE 选择匹配 ID 的响应，禁止重定向。适配器不增加自动重试，结果未知时不能重复执行工具。
+
+回归入口新增 `paperclip-browser-tool-access.test.ts`（本机 HTTP/格式/取消）和 `paperclip-tool-lifecycle.test.ts`（授权/回传/释放/暂停/Stop/撤销顺序）；原 BrowserMcpModule 权限和普通 ACP 测试仍执行。故障验收源码清单已加入新适配器，不能只哈希旧 Runtime 门面文件。
 
 ## 数据和升级约束
 
@@ -141,3 +168,5 @@ bun run build:claw-onboard
 Paperclip 的 14 个 BrowserOS HTTP 操作现已纳入 OpenAPI 覆盖检查。后续改动请求体时维护 `server/src/services/browseros/http-contract.ts`，实际 handler 与 `server/src/routes/browseros-openapi.ts` 共用该契约；规范必须区分个人 OAuth、Run 浏览器能力令牌和仅返回 405 的 MCP GET/DELETE，不能用普通 Agent API key 的描述替代。
 
 本次配置存储与消息接口拆分的实际验收、首次失败和覆盖边界见配套 Paperclip 仓库 `tests/browseros-machine-acceptance/interface-refactor-validation-2026-10-18.md`。
+
+BrowserToolAccess 拆分后的当轮验证与首次失败记录见 Paperclip `tests/browseros-machine-acceptance/browser-tool-access-validation-2026-10-18.md`。

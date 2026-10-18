@@ -35,3 +35,29 @@ export type PaperclipTurnEvent =
   | { type: 'start' }
   | { type: 'text'; text: string }
   | { type: 'finish' }
+
+export interface BrowserToolRequest {
+  jsonrpc: '2.0'
+  id?: string | number
+  method: string
+  params?: Record<string, unknown>
+}
+
+export interface BrowserToolResponse {
+  jsonrpc?: string
+  id?: string | number | null
+  result?: unknown
+  error?: { message: string; code: number }
+}
+
+/** Call-scoped local authority. The core releases it after result delivery settles. */
+export interface BrowserToolAccess {
+  acquire(
+    scope: PaperclipScope,
+    runId: string,
+    signal: AbortSignal,
+  ): {
+    call(request: BrowserToolRequest): Promise<BrowserToolResponse>
+    release(): void
+  }
+}

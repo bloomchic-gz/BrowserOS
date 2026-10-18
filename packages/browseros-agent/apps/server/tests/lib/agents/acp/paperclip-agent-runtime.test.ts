@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import type { AcpAgentStreamInput } from '../../../../src/lib/agents/acp/acp-agent-runtime'
 import { PaperclipAgentRuntime } from '../../../../src/lib/agents/acp/paperclip-agent-runtime'
 import { FileBindingStore } from '../../../../src/lib/agents/acp/paperclip-binding-store'
+import { LocalMcpBrowserToolAccess } from '../../../../src/lib/agents/acp/paperclip-browser-tool-access'
 import { PaperclipConnectionRuntime } from '../../../../src/lib/agents/acp/paperclip-connection-runtime'
 import { DbConversationSink } from '../../../../src/lib/agents/acp/paperclip-conversation-sink'
 import type { PaperclipTurnEvent } from '../../../../src/lib/agents/acp/paperclip-runtime-ports'
@@ -208,7 +209,7 @@ describe('Paperclip native conversation runtime', () => {
     const f = await fixture()
     const refreshed: string[] = []
     const snapshots: unknown[] = []
-    const runtime = new PaperclipConnectionRuntime(f.mcpPort, {
+    const runtime = new PaperclipConnectionRuntime({
       bindingStore: new FileBindingStore(f.dir),
       conversationSink: {
         replace: async (value) => {
@@ -222,11 +223,11 @@ describe('Paperclip native conversation runtime', () => {
           return config
         },
       },
-      createToolLease: () => ({
+      browserTools: new LocalMcpBrowserToolAccess(f.mcpPort, () => ({
         token: 'local-lease',
         revoke() {},
         updateBrowserContext() {},
-      }),
+      })),
     })
     cleanup.push(() => runtime.shutdown())
     const events: PaperclipTurnEvent[] = []
