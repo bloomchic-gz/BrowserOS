@@ -170,3 +170,7 @@ Paperclip 的 14 个 BrowserOS HTTP 操作现已纳入 OpenAPI 覆盖检查。�
 本次配置存储与消息接口拆分的实际验收、首次失败和覆盖边界见配套 Paperclip 仓库 `tests/browseros-machine-acceptance/interface-refactor-validation-2026-10-18.md`。
 
 BrowserToolAccess 拆分后的当轮验证与首次失败记录见 Paperclip `tests/browseros-machine-acceptance/browser-tool-access-validation-2026-10-18.md`。
+
+## Paperclip 侧工具准备接入点
+
+配套 Paperclip 已把 heartbeat 的浏览器 Run 授权、MCP 配置和绑定 Task 提示词准备集中到 `server/src/services/heartbeat/browser-tool-preparation.ts`。原最终调度检查、网关清理、Stop 和恢复保持各自所有权；BrowserOS 协议与 BrowserToolAccess 无变化。当前验证与覆盖边界见 Paperclip `tests/browseros-machine-acceptance/heartbeat-browser-tools-validation-2026-10-18.md`。
