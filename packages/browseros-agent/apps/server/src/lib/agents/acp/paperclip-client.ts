@@ -2,9 +2,6 @@ import type { PaperclipAgentConfig } from '@browseros/shared/schemas/agent'
 import { z } from 'zod'
 import { BROWSEROS_TOOL_LEASE_HEADER } from '../../browser-tool-lease'
 
-import { DbAcpAgentStore } from '../storage/acp-agent-store'
-import type { AcpAgentStreamInput } from './acp-agent-runtime'
-
 export const CommentSchema = z.object({
   id: z.string(),
   body: z.string(),
@@ -53,20 +50,6 @@ const ResponseSchema = z.object({
   jsonrpc: z.string().optional(),
   id: z.union([z.string(), z.number(), z.null()]).optional(),
 })
-const TokensSchema = z.object({
-  access_token: z.string().min(1),
-  refresh_token: z.string().min(1),
-  expires_in: z.number().positive(),
-})
-
-export {
-  type Binding,
-  loadBinding,
-  parseBinding,
-  type SentMessage,
-} from './paperclip-binding'
-
-const refreshes = new Map<string, Promise<PaperclipAgentConfig>>()
 
 export async function paperclipRequest(
   config: PaperclipAgentConfig,
@@ -111,58 +94,9 @@ export async function paperclipRequest(
   return result
 }
 
-export async function freshPaperclipConfig(
-  agentId: string,
-  fallback: PaperclipAgentConfig,
-): Promise<PaperclipAgentConfig> {
-  if (!fallback.refreshToken || !fallback.oauthClientId) return fallback
-  const pending = refreshes.get(agentId)
-  if (pending) return pending
-  const refresh = (async () => {
-    const store = new DbAcpAgentStore()
-    const config = (await store.get(agentId))?.paperclipConfig ?? fallback
-    if (
-      config.expiresAt === undefined ||
-      config.expiresAt > Date.now() + 60_000
-    )
-      return config
-    const response = await fetch(
-      `${new URL(config.url).origin}/mcp/oauth/token`,
-      {
-        method: 'POST',
-        redirect: 'error',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          grant_type: 'refresh_token',
-          client_id: config.oauthClientId,
-          refresh_token: config.refreshToken,
-          resource: `${new URL(config.url).origin}/mcp/paperclip`,
-        }),
-        signal: AbortSignal.timeout(15_000),
-      },
-    )
-    if (!response.ok) throw new Error('Reconnect your Paperclip account.')
-    const tokens = TokensSchema.parse(await response.json())
-    const next = {
-      ...config,
-      token: String(tokens.access_token),
-      refreshToken: String(tokens.refresh_token),
-      expiresAt: Date.now() + Number(tokens.expires_in) * 1000,
-    }
-    await store.update(agentId, { paperclipConfig: next })
-    return next
-  })()
-  refreshes.set(agentId, refresh)
-  try {
-    return await refresh
-  } finally {
-    refreshes.delete(agentId)
-  }
-}
-
 export async function callLocalBrowser(
   serverPort: number,
-  input: Pick<AcpAgentStreamInput, 'readOnly' | 'browserToolLeaseToken'>,
+  input: { readOnly: boolean; browserToolLeaseToken: string },
   request: z.infer<typeof PollSchema>['calls'][number]['request'],
   signal: AbortSignal,
 ) {

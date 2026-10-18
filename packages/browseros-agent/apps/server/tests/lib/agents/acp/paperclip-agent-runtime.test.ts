@@ -4,7 +4,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AcpAgentStreamInput } from '../../../../src/lib/agents/acp/acp-agent-runtime'
 import { PaperclipAgentRuntime } from '../../../../src/lib/agents/acp/paperclip-agent-runtime'
+import { FileBindingStore } from '../../../../src/lib/agents/acp/paperclip-binding-store'
+import { PaperclipConnectionRuntime } from '../../../../src/lib/agents/acp/paperclip-connection-runtime'
 import { DbConversationSink } from '../../../../src/lib/agents/acp/paperclip-conversation-sink'
+import type { PaperclipTurnEvent } from '../../../../src/lib/agents/acp/paperclip-runtime-ports'
 import { BROWSEROS_TOOL_LEASE_HEADER } from '../../../../src/lib/browser-tool-lease'
 
 setDefaultTimeout(30000)
@@ -174,6 +177,8 @@ async function fixture(outcome?: 'rejected' | 'unknown') {
     return chunks
   }
   return {
+    dir,
+    mcpPort: mcp.port ?? 0,
     input,
     saved,
     failNextSave: () => {
@@ -199,6 +204,61 @@ async function fixture(outcome?: 'rejected' | 'unknown') {
 }
 
 describe('Paperclip native conversation runtime', () => {
+  it('runs the connection core through injected storage/config and domain events without a UI stream', async () => {
+    const f = await fixture()
+    const refreshed: string[] = []
+    const snapshots: unknown[] = []
+    const runtime = new PaperclipConnectionRuntime(f.mcpPort, {
+      bindingStore: new FileBindingStore(f.dir),
+      conversationSink: {
+        replace: async (value) => {
+          snapshots.push(value)
+        },
+      },
+      agentConfigs: {
+        get: async () => f.input.agent,
+        fresh: async (id, config) => {
+          refreshed.push(id)
+          return config
+        },
+      },
+      createToolLease: () => ({
+        token: 'local-lease',
+        revoke() {},
+        updateBrowserContext() {},
+      }),
+    })
+    cleanup.push(() => runtime.shutdown())
+    const events: PaperclipTurnEvent[] = []
+    const turn = runtime.beginTurn({
+      agent: f.input.agent,
+      conversationId: f.input.conversationId,
+      readOnly: true,
+      message: {
+        id: 'core-message',
+        body: 'Read the page',
+        hasAttachments: false,
+      },
+    })
+    await turn.execute((event) => {
+      events.push(event)
+    })
+    expect(events[0]).toEqual({ type: 'start' })
+    expect(events.at(-1)).toEqual({ type: 'finish' })
+    expect(events).toContainEqual({ type: 'text', text: 'complete' })
+    expect(f.sent).toHaveLength(1)
+    expect(f.stats().opens).toBe(1)
+    expect(refreshed.length).toBeGreaterThan(1)
+    expect(refreshed.every((id) => id === f.input.agent.id)).toBe(true)
+    f.comments.push({
+      id: 'core-team',
+      body: 'Team reply after observer finished',
+    })
+    await f.until(() => JSON.stringify(snapshots).includes('core-team'))
+    expect(runtime.state(f.input.conversationId)?.status).toBe('online')
+    expect(f.sent).toHaveLength(1)
+  })
+
   it('keeps working after foreground completion, syncs team messages once, and restores paused connections', async () => {
     const f = await fixture()
     const runtime = f.runtime()

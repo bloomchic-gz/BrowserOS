@@ -39,7 +39,7 @@ Runner 和 BrowserOS 都主动连接 Paperclip；远程 Agent 的浏览器请求
 
 | 边界 | 实现入口 | 升级必须保持 |
 | --- | --- | --- |
-| 核心运行状态 | `apps/server/src/lib/agents/acp/paperclip-agent-runtime.ts` | 每个对话的后台 worker、同步、暂停、恢复；关闭聊天流不关闭后台 |
+| 核心运行状态 | `apps/server/src/lib/agents/acp/paperclip-connection-runtime.ts`；`paperclip-agent-runtime.ts` 保留装配入口 | 每个对话的后台 worker、同步、暂停、恢复；关闭聊天流不关闭后台 |
 | 远端协议与本地绑定 | `apps/server/src/lib/agents/acp/paperclip-client.ts`、`paperclip-binding.ts` | requestId 复用、原子保存、OAuth 刷新、连接身份不能静默改变 |
 | Agent 类型和配置 | `packages/shared/src/schemas/agent.ts`、server `agent-types.ts`、`storage/acp-agent-store.ts`、`api/routes/agents.ts` | 凭据只在后台，模型/effort 仍可编辑，刷新和删除回调不丢失 |
 | ACP 分派 | server `acp-agent-runtime.ts`、`acp-agent-policy.ts`、`api/services/chat-service.ts`、`api/types.ts` | Paperclip 分支不改变普通本地 ACP；运行租约要正确释放 |
@@ -62,7 +62,30 @@ flowchart LR
   R --> M["消息投影<br/>稳定 ID、编辑、删除"] --> S["ConversationSink"] --> D["DbConversationSink<br/>现有会话数据库 / UIMessage"]
 ```
 
-这是仓库内接口，不是稳定公开插件 API。后续再提取 AgentConfigProvider、BrowserToolAccess；前台聊天流仍使用现有 AI SDK，协议和 UI 不在本次一起重写。
+后续阶段已补齐配置存储和前台消息边界：
+
+- `paperclip-runtime-ports.ts`：定义 `AgentConfigProvider`、最小 Agent/单条消息输入和 `start/text/finish` 事件。核心不再接收 `UIMessage[]` 或完整 `AcpAgentDefinition`。
+- `paperclip-agent-config.ts`：`DbAgentConfigProvider` 适配上游 AgentStore，封装 OAuth 刷新和凭据保存；默认单例让 HTTP 连接查询与所有后台 worker 共用并发刷新，保存失败继续向上传递。保留静态 token 的原行为。
+- `paperclip-connection-runtime.ts`：保留连接、Task/requestId、同步、恢复、暂停/Stop 状态机。存储和配置全部注入，不再创建数据库 store 或 AI SDK stream。
+- `paperclip-stream.ts`：从 UI 历史提取最后一条本地 user 消息，转换观察事件为原 AI SDK chunks；附件拒绝、错误文本和 onFinish 的持久历史回传保持不变。
+- `paperclip-agent-runtime.ts`：薄装配入口，保留原构造方法、`stream`、生命周期方法与旧 `getAgent` 测试注入口；ACP 分派、路由、UI 和外部故障夹具无需迁移。新调用者可注入完整 `agentConfigs`。
+
+```mermaid
+flowchart TB
+  UI["现有聊天 / HTTP / ACP 入口"] --> F["PaperclipAgentRuntime<br/>薄装配层"]
+  F --> A["消息适配<br/>UIMessage ↔ 单条消息 / 观察事件"]
+  A --> R["连接核心<br/>Task、常驻连接、同步、暂停 / Stop"]
+  F --> R
+  R --> B["BindingStore → JSON v1"]
+  R --> C["ConversationSink → 会话数据库"]
+  R --> G["AgentConfigProvider → Agent 数据库 / OAuth"]
+  R <-->|原有 HTTP 协议| P["Paperclip Task / Runner"]
+  R <-->|原有租约与 MCP| T["本机浏览器工具"]
+```
+
+以后上游变更 Agent 数据库、UI 消息或聊天流接口时，优先调整对应适配层；连接核心和原有验收保持稳定。业务源码仅调整自有集成文件，没有增加对 ACP 分派、HTTP 路由、UI 组件的补丁。本轮没有数据迁移、wire 协议变化或新增调度器。
+
+这是仓库内接口，不是稳定公开插件 API。BrowserToolAccess 仍待后续单独提取；消息同步仍为全量分页，仍使用现有 AI SDK 渲染，未改成新的增量消息协议。
 
 ## 数据和升级约束
 
@@ -87,7 +110,9 @@ BrowserOS 现有回归入口包括：
 
 - `apps/server/tests/lib/agents/acp/paperclip-binding.test.ts`
 - `apps/server/tests/lib/agents/acp/paperclip-conversation.test.ts`
-- `apps/server/tests/lib/agents/acp/paperclip-agent-runtime.test.ts`
+- `apps/server/tests/lib/agents/acp/paperclip-agent-runtime.test.ts`（含直接注入配置/存储的核心测试）
+- `apps/server/tests/lib/agents/acp/paperclip-agent-config.test.ts`（并发刷新、持久化失败、静态凭据）
+- `apps/server/tests/lib/agents/acp/paperclip-stream.test.ts`（消息输入、流 ID、onFinish 和错误）
 - `apps/server/tests/lib/agents/acp/acp-agent-runtime.test.ts`
 - `apps/server/tests/api/services/mcp/browser-mcp-module.test.ts`
 - `apps/server/tests/api/routes/agents.test.ts`
@@ -114,3 +139,5 @@ bun run build:claw-onboard
 这组检查覆盖应用工作区的 TypeScript、Rust、本机原生程序、服务端打包、扩展及引导页；不代表 Chromium 浏览器内核源码构建、跨平台运行或真实 Agent 端到端验收。2026-10-18 的两仓执行结果及环境版本统一记录在 Paperclip `tests/browseros-machine-acceptance/workspace-validation-2026-10-18.md`。
 
 Paperclip 的 14 个 BrowserOS HTTP 操作现已纳入 OpenAPI 覆盖检查。后续改动请求体时维护 `server/src/services/browseros/http-contract.ts`，实际 handler 与 `server/src/routes/browseros-openapi.ts` 共用该契约；规范必须区分个人 OAuth、Run 浏览器能力令牌和仅返回 405 的 MCP GET/DELETE，不能用普通 Agent API key 的描述替代。
+
+本次配置存储与消息接口拆分的实际验收、首次失败和覆盖边界见配套 Paperclip 仓库 `tests/browseros-machine-acceptance/interface-refactor-validation-2026-10-18.md`。
