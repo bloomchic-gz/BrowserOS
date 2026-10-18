@@ -174,3 +174,7 @@ BrowserToolAccess 拆分后的当轮验证与首次失败记录见 Paperclip `te
 ## Paperclip 侧工具准备接入点
 
 配套 Paperclip 已把 heartbeat 的浏览器 Run 授权、MCP 配置和绑定 Task 提示词准备集中到 `server/src/services/heartbeat/browser-tool-preparation.ts`。原最终调度检查、网关清理、Stop 和恢复保持各自所有权；BrowserOS 协议与 BrowserToolAccess 无变化。当前验证与覆盖边界见 Paperclip `tests/browseros-machine-acceptance/heartbeat-browser-tools-validation-2026-10-18.md`。
+
+## Paperclip 侧 Machine 工作区策略
+
+配套 Paperclip 已新增 `server/src/services/heartbeat/machine-workspace-policy.ts`：集中 Machine 使用限制、远端源、空控制端配置和工作区描述。Runner 仍负责远端目录校验；heartbeat 原流程负责 Task 绑定、租约获取、远程分派、Stop 与恢复。BrowserOS 的连接、消息同步、BrowserToolAccess 和网络协议保持不变。当前验证见 Paperclip `tests/browseros-machine-acceptance/machine-workspace-policy-validation-2026-10-18.md`。
