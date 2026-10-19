@@ -29,9 +29,9 @@ Runner 和 BrowserOS 都主动连接 Paperclip；远程 Agent 的浏览器请求
 
 长期按能力接入所有 Agent，不在 BrowserOS 固化 Codex/Claude 品牌名单。Paperclip 负责统一能力发现和服务端准入，Runner 负责执行机探测与 provider 适配，BrowserOS 共用绑定、同步和工具执行链路。模型与思考强度按远端声明展示，不支持的选项明确说明。
 
-能参与任务和能实际控制浏览器需要分别验证；缺少 Run 专属工具通道的 Agent 应补齐适配，不能把纯文本输出算作浏览器执行成功。ACP 是当前路径，其他执行方式满足相同任务、工具、暂停、取消与结果契约也可接入。
+能参与任务和能实际控制浏览器需要分别验证；缺少 Run 专属工具通道的 Agent 应补齐适配，不能把纯文本输出算作浏览器执行成功。当前支持 ACP，以及 Codex/Claude 原生 CLI；其他执行方式满足相同任务、工具、暂停、取消与结果契约也可接入。
 
-当前服务端通过统一能力入口注册 Codex、Claude、Kiro、Hermes、Grok 的 ACP 路径；界面使用远端模型/effort 能力，支持手工模型 ID，并显示不可用 Agent 的原因。注册不等于当前机器已登录或已通过真实验收；各 Agent 的结果、外部额度限制和缺口见 Paperclip 的 `tests/browseros-machine-acceptance/implementation-2026-10-18.md`。完整能力契约与覆盖状态维护在 Paperclip 的 `doc/integrations/browseros-contracts.md`（R16–R17）。
+当前服务端通过统一能力入口注册 Codex/Claude 的 CLI/ACP 双路径，以及 Kiro、Hermes、Grok 的 ACP 路径；界面使用远端模型/effort 能力，支持手工模型 ID，并显示不可用 Agent 的原因。注册不等于当前机器已登录或已通过真实验收；各 Agent 的结果、外部额度限制和缺口见 Paperclip 的 `tests/browseros-machine-acceptance/implementation-2026-10-18.md`。完整能力契约与覆盖状态维护在 Paperclip 的 `doc/integrations/browseros-contracts.md`（R16–R17）。
 
 ## 核心和可替换接入
 
@@ -131,7 +131,7 @@ node tests/browseros-machine-acceptance/run.mjs --run /absolute/private/config.j
 
 配置中的 BrowserOS Agent 必须指向同一独立 Paperclip 测试实例和 Machine 上的被测 Agent；不要把真实日常账号/生产实例当测试夹具。每次运行新建 conversation/Task，并使用独立报告目录，不依赖旧 Task ID。测试结束暂停本次连接并保留证据和测试页，便于审查；不修改全局 Agent 设置，不停止共享服务。
 
-自动 live 覆盖建 Task、团队继续、真实 ACP 浏览器工具、暂停恢复、本地继续、Stop、普通 Task 隔离和双端结果。UI 模型选择和数据库迁移另有验收责任，不能由这个 live 成功替代。断网、poll/result/ack 丢失、后台与工具转发进程 SIGKILL、暂停后重启已有 `tests/browseros-machine-acceptance/faults/run.mjs` 独立夹具，可指定 `--cdp` 在专用页面计数。完整 Paperclip 服务、PostgreSQL 及两者同时硬重启，Runner CLI 被 SIGKILL 后的进程回收现已通过独立实例验收，见 Paperclip `tests/browseros-machine-acceptance/hard-restart-validation-2026-10-18.md`。整个浏览器应用硬重启仍未覆盖。具体命令、首次失败和最终证据见 Paperclip `tests/browseros-machine-acceptance/faults/README.md` 与同目录验证记录。
+自动 live 覆盖建 Task、团队继续、真实 CLI/ACP 浏览器工具、暂停恢复、本地继续、Stop、普通 Task 隔离和双端结果。UI 模型选择和数据库迁移另有验收责任，不能由这个 live 成功替代。断网、poll/result/ack 丢失、后台与工具转发进程 SIGKILL、暂停后重启已有 `tests/browseros-machine-acceptance/faults/run.mjs` 独立夹具，可指定 `--cdp` 在专用页面计数。完整 Paperclip 服务、PostgreSQL 及两者同时硬重启，Runner CLI 被 SIGKILL 后的进程回收现已通过独立实例验收，见 Paperclip `tests/browseros-machine-acceptance/hard-restart-validation-2026-10-18.md`。整个浏览器应用硬重启仍未覆盖。具体命令、首次失败和最终证据见 Paperclip `tests/browseros-machine-acceptance/faults/README.md` 与同目录验证记录。
 
 BrowserOS 现有回归入口包括：
 
@@ -165,7 +165,7 @@ bun run build:claw-onboard
 
 这组检查覆盖应用工作区的 TypeScript、Rust、本机原生程序、服务端打包、扩展及引导页；不代表 Chromium 浏览器内核源码构建、跨平台运行或真实 Agent 端到端验收。2026-10-18 的两仓执行结果及环境版本统一记录在 Paperclip `tests/browseros-machine-acceptance/workspace-validation-2026-10-18.md`。
 
-Paperclip 的 14 个 BrowserOS HTTP 操作现已纳入 OpenAPI 覆盖检查。后续改动请求体时维护 `server/src/services/browseros/http-contract.ts`，实际 handler 与 `server/src/routes/browseros-openapi.ts` 共用该契约；规范必须区分个人 OAuth、Run 浏览器能力令牌和仅返回 405 的 MCP GET/DELETE，不能用普通 Agent API key 的描述替代。
+Paperclip 的 15 个 BrowserOS HTTP 操作现已纳入 OpenAPI 覆盖检查。后续改动请求体时维护 `server/src/services/browseros/http-contract.ts`，实际 handler 与 `server/src/routes/browseros-openapi.ts` 共用该契约；规范必须区分个人 OAuth、Run 浏览器能力令牌和仅返回 405 的 MCP GET/DELETE，不能用普通 Agent API key 的描述替代。
 
 本次配置存储与消息接口拆分的实际验收、首次失败和覆盖边界见配套 Paperclip 仓库 `tests/browseros-machine-acceptance/interface-refactor-validation-2026-10-18.md`。
 
@@ -210,3 +210,23 @@ Paperclip 的 0357 迁移为已有绑定回填评论变更索引，不需要 Bro
 验收补充 `paperclip-message-sync.test.ts` 与增量 runtime 用例：旧服务兼容、排序/删除、重读、缓存版本、本地写失败、并发 Resume、暂停与后台恢复。完整服务入口在 Paperclip `tests/browseros-machine-acceptance/faults/full-stack.ts --scenario messages`；实际结果统一见该仓库本轮验收记录。后续跟随上游主要检查 Comment DTO、ConversationSink 和绑定原子保存行为。
 
 本轮最终通过 2,163 项 BrowserOS 测试及工作区检查/构建；两仓完整测试、205 条历史增量实测、真实 Codex、故障与硬重启证据见 Paperclip `tests/browseros-machine-acceptance/incremental-sync-validation-2026-10-19.md`。该记录保留条件跳过、首次失败与覆盖范围。
+
+## Codex / Claude 原生 CLI（2026-10-19）
+
+在 Paperclip 给 Codex 或 Claude Agent 选择 CLI 后，BrowserOS 直接使用该执行方式；显式 ACP 继续走 ACP。无需在 BrowserOS 新增一份 engine 选择，也不需要本机安装这些远程 CLI。保留 Agent 原有默认：未设置 engine 的 Machine 为 CLI，本地 adapter 为 ACP。Machine 需要声明 `browseros-cli-v1` 的新版 Runner（`2026.1019.0-machine.9` 起）；旧版本会在执行前明确要求升级。
+
+```mermaid
+flowchart LR
+  B["BrowserOS<br/>对话与本机浏览器"] <--> P["Paperclip<br/>同一 Task、团队评论、授权"]
+  P <--> R["Machine Runner"]
+  R --> C["Codex / Claude CLI"]
+  R --> A["原有 ACP"]
+  C <-->|Run 专属 MCP| P
+  A <-->|Run 专属 MCP| P
+```
+
+Paperclip 在每轮注入绑定 Task 的浏览器、团队协作、暂停和结果回写指令，并将 CLI 文本事件转换成现有 snapshot 的 offset/text。BrowserOS 的 Runtime、增量消息同步、BindingStore、ConversationSink 和 BrowserToolAccess 无需增加 provider 分支。Task 模型/effort 覆盖继续生效；切换 CLI/ACP 仅重建不兼容的 provider 会话，同一 Task 和评论保留。
+
+Codex 使用每 Run 的工具别名和进程凭据，避免写入共享配置；Claude 每 Run 使用独立严格 MCP 配置，暂停时为空配置。两者沿用现有租约撤销、Stop 取消和未知结果保护。协议完整说明在 Paperclip `doc/integrations/browseros-contracts.md`；可重复验收的私有配置增加 `engine: "cli"`，使用同一七阶段 live 脚本。故障夹具支持两个 CLI 的 server/database/both 硬重启，确定性夹具与真实模型验收分别报告。
+
+本轮验证与首次失败统一记录在配套 Paperclip 仓库 `tests/browseros-machine-acceptance/native-cli-validation-2026-10-19.md`，包含真实 Codex/Claude CLI、普通 ACP 隔离、独立服务故障和 Runner 强杀验收；不要用确定性夹具结果替代真实模型结果。

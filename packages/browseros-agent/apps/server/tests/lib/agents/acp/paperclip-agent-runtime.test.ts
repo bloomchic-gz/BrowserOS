@@ -346,6 +346,15 @@ describe('Paperclip native conversation runtime', () => {
       f.failNextSave()
       f.comments.push({ id: 'disk-retry', body: 'Must reach durable history' })
       await f.until(() => JSON.stringify(f.saved).includes('disk-retry'))
+      // Conversation persistence precedes the awaited binding checkpoint.
+      // Wait for that commit before asserting the publicly acknowledged state.
+      await f.until(
+        () =>
+          runtime
+            .state(f.input.conversationId)
+            ?.messages.some((m) => m.id === 'paperclip-comment-disk-retry') ??
+          false,
+      )
       expect(
         runtime
           .state(f.input.conversationId)

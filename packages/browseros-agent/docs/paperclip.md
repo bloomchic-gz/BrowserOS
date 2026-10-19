@@ -2,7 +2,7 @@
 
 This source build adds a native **Paperclip** agent alongside local Codex, Claude and custom ACP agents. In Settings → AI & Agents, choose **Add Paperclip**, enter the server origin, authorize your account, and select a remote agent. OAuth device authorization and refresh are handled by the local BrowserOS server. To reconnect an existing account, choose **Edit → Reconnect account** in its configured-agent menu; the local connection ID is retained so saved conversations keep their Tasks.
 
-The Paperclip server needs the companion `/api/browseros` integration, authenticated accounts, `PAPERCLIP_PUBLIC_URL`, and **Assistant connections (MCP)** enabled. Remote origins require HTTPS; localhost HTTP is supported for development. The current server integration supports legacy `codex_local` and `claude_local` adapters, with Codex ACP live-tested. It does not expose a generic ACP HTTP transport and does not yet support Paperclip's native Runner.
+The Paperclip server needs the companion `/api/browseros` integration, authenticated accounts, `PAPERCLIP_PUBLIC_URL`, and **Assistant connections (MCP)** enabled. Remote origins require HTTPS; localhost HTTP is supported for development. The companion server supports Codex and Claude through native CLI or ACP, and Kiro, Hermes and Grok through ACP. Codex/Claude keep the execution engine selected in Paperclip. Machine CLI execution requires a runner advertising `browseros-cli-v1` (`2026.1019.0-machine.9` or newer). It does not expose a generic ACP HTTP transport and does not yet support Paperclip's native Runner.
 
 Every conversation creates its own Task on first send. Its Task ID and exact mutation arguments are saved atomically under the BrowserOS data directory's `agents/paperclip-sessions/` folder. Follow-up messages continue that Task. A stable UI message ID retains the same request receipt after retries. Switching a saved conversation to a different remote connection is rejected; start a new conversation instead.
 
@@ -10,7 +10,7 @@ The agent executes in Paperclip. BrowserOS maintains an outbound authenticated l
 
 OAuth credentials are stored with the local server's agent configuration, omitted from public agent API responses, and refreshed using rotating refresh tokens. Browser calls are not automatically replayed after an ambiguous network outcome. Tasks survive reconnects; in-flight browser calls do not survive a server restart. The current Paperclip broker is process-local, so deployments need one API process or consistent connection routing. A browser must remain online while its tools are in use.
 
-Text prompts are supported. Add attachments directly to the linked Task in Paperclip. Remote permissions, approvals, budgets and CLI credentials are configured in Paperclip. Local validation used an independent Paperclip process/database and the BrowserOS development browser; public cross-machine HTTPS and live Claude execution were not verified.
+Text prompts are supported. Add attachments directly to the linked Task in Paperclip. Remote permissions, approvals, budgets and CLI credentials are configured in Paperclip. Local validation used an independent Paperclip process/database and the BrowserOS development browser; public cross-machine HTTPS is a separate qualification. Per-provider live results and external limits are recorded in the companion Paperclip acceptance reports.
 
 Focused checks:
 
@@ -98,6 +98,14 @@ The companion Paperclip server also injects a BrowserOS-bound Task contract into
 
 This is a combination of ACP turn instructions and MCP initialization instructions, not a new provider-native system message. When browser access is missing, the Agent should record the blocker and required recovery in the Task, continue only independent work, and avoid alternate browsers or blind replay. A pause retains transcript synchronization. Final results are posted to the Task once and synchronize back automatically.
 
-Message synchronization negotiates `messageSyncVersion: 1` with Paperclip. New servers return incremental comment updates and deletion markers; the background connection saves the cursor with its local cache after the conversation is stored. Paused connections keep synchronizing, and restarts reuse the same Task and saved cursor. Older servers retain full pagination. Redaction/projection changes and periodic reconciliation rebuild the cache; execution snapshots and ACP output still use the existing polling path.
+Message synchronization negotiates `messageSyncVersion: 1` with Paperclip. New servers return incremental comment updates and deletion markers; the background connection saves the cursor with its local cache after the conversation is stored. Paused connections keep synchronizing, and restarts reuse the same Task and saved cursor. Older servers retain full pagination. Redaction/projection changes and periodic reconciliation rebuild the cache; execution snapshots and normalized CLI/ACP output still use the existing polling path.
 
 本轮增量同步与真实远程执行的完整验证记录位于配套 Paperclip 仓库 `tests/browseros-machine-acceptance/incremental-sync-validation-2026-10-19.md`。
+
+### Native CLI execution
+
+Choose CLI or ACP on the remote Paperclip Codex/Claude Agent, then use that Agent normally in BrowserOS. Model and effort overrides remain Task-scoped. BrowserOS uses the same background connection, Task comments and browser tool channel for both engines. Pause revokes browser access while preserving message sync; Stop cancels the active run; reconnecting never replays an uncertain browser write.
+
+The server injects the bound Task instructions on every native continuation and normalizes assistant text into the existing snapshot output. Codex uses an invocation-only MCP alias; Claude uses a strict per-run MCP configuration, including an empty config while browser access is unavailable. A changed engine starts a compatible provider session while retaining the Task and conversation. No BrowserOS data migration is needed.
+
+本轮 Codex/Claude 原生 CLI 的实现、真实模型、故障恢复与全仓验证记录见配套 Paperclip 仓库 `tests/browseros-machine-acceptance/native-cli-validation-2026-10-19.md`。
