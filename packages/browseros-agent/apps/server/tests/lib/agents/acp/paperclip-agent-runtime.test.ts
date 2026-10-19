@@ -16,12 +16,14 @@ const cleanup: Array<() => unknown> = []
 afterEach(async () => {
   for (const stop of cleanup.splice(0).reverse()) await stop()
 })
-async function fixture(outcome?: 'rejected' | 'unknown') {
+async function fixture(outcome?: 'rejected' | 'unknown', incremental = false) {
   const dir = await mkdtemp(join(tmpdir(), 'paperclip-runtime-'))
   cleanup.push(() => rm(dir, { recursive: true, force: true }))
   const tasks = new Map<string, { run: string | null; receipts: Set<string> }>()
   const comments: Array<{ id: string; body: string; authorAgentId?: string }> =
     []
+  const syncRequests: string[] = []
+  const syncSnapshots = new Map<string, string>()
   const sent: Array<{ requestId: string; body: string }> = []
   const tools: Array<{ url: string; lease: string | null }> = []
   let opens = 0,
@@ -104,10 +106,41 @@ async function fixture(outcome?: 'rejected' | 'unknown') {
         running = false
         return Response.json({ ok: true })
       }
+      if (path.endsWith('/message-changes')) {
+        const cursor = url.searchParams.get('cursor')
+        syncRequests.push(cursor ?? 'initial')
+        const current = JSON.stringify(comments)
+        const token = String(
+          [...syncSnapshots.values()].indexOf(current) + 1 ||
+            syncSnapshots.size + 1,
+        )
+        const prior = JSON.parse(
+          syncSnapshots.get(cursor ?? '') ?? '[]',
+        ) as typeof comments
+        syncSnapshots.set(token, current)
+        return Response.json({
+          version: 1,
+          reset: !cursor,
+          comments: comments
+            .filter(
+              (c) =>
+                !prior.some((p) => JSON.stringify(p) === JSON.stringify(c)),
+            )
+            .map((c) => ({ ...c, createdAt: '2026-10-19T00:00:00Z' })),
+          removed: prior
+            .filter((p) => !comments.some((c) => c.id === p.id))
+            .map((c) => c.id),
+          cursor: token,
+          hasMore: false,
+        })
+      }
+      if (path.endsWith('/messages') && incremental)
+        throw new Error('Unexpected full comment poll')
       if (path.endsWith('/messages'))
         return Response.json({ comments, next: null })
       if (path.endsWith('/snapshot'))
         return Response.json({
+          messageSyncVersion: incremental ? 1 : undefined,
           comments: [],
           liveRuns: running ? [{}] : [],
           run: task.run
@@ -195,6 +228,7 @@ async function fixture(outcome?: 'rejected' | 'unknown') {
     },
     tasks,
     comments,
+    syncRequests,
     async until(check: () => boolean) {
       const deadline = Date.now() + 8000
       while (!check() && Date.now() < deadline)
@@ -302,20 +336,143 @@ describe('Paperclip native conversation runtime', () => {
     await deleted.restore()
     expect(deleted.state(f.input.conversationId)).toBeNull()
   })
-  it('retries a failed conversation write before acknowledging synchronized messages', async () => {
-    const f = await fixture()
+  it.each([false, true])(
+    'retries a failed conversation write before acknowledging synchronized messages (incremental=%s)',
+    async (incremental) => {
+      const f = await fixture(undefined, incremental)
+      const runtime = f.runtime()
+      for await (const _ of runtime.stream(f.input)) {
+      }
+      f.failNextSave()
+      f.comments.push({ id: 'disk-retry', body: 'Must reach durable history' })
+      await f.until(() => JSON.stringify(f.saved).includes('disk-retry'))
+      expect(
+        runtime
+          .state(f.input.conversationId)
+          ?.messages.filter((m) => m.id === 'paperclip-comment-disk-retry'),
+      ).toHaveLength(1)
+      expect(f.sent).toHaveLength(1)
+    },
+  )
+  it('continues incremental team edits while paused and resumes the durable cursor after restart', async () => {
+    const f = await fixture(undefined, true)
     const runtime = f.runtime()
     for await (const _ of runtime.stream(f.input)) {
     }
-    f.failNextSave()
-    f.comments.push({ id: 'disk-retry', body: 'Must reach durable history' })
-    await f.until(() => JSON.stringify(f.saved).includes('disk-retry'))
+    await runtime.control(f.input.conversationId, 'pause')
+    f.comments.push({ id: 'team', body: 'Team reply' })
+    await f.until(() =>
+      JSON.stringify(runtime.state(f.input.conversationId)?.messages).includes(
+        'Team reply',
+      ),
+    )
+    f.comments[0].body = 'Team edited'
+    await f.until(() =>
+      JSON.stringify(runtime.state(f.input.conversationId)?.messages).includes(
+        'Team edited',
+      ),
+    )
+    await runtime.shutdown()
+    const count = f.syncRequests.length
+    const restored = f.runtime()
+    await restored.restore()
+    await f.until(() => f.syncRequests.length > count)
+    expect(f.syncRequests[count]).not.toBe('initial')
+    expect(restored.state(f.input.conversationId)?.enabled).toBe(false)
+    f.comments.splice(0)
+    await f.until(
+      () =>
+        !JSON.stringify(
+          restored.state(f.input.conversationId)?.messages,
+        ).includes('Team edited'),
+    )
+    expect(f.stats().opens).toBe(1)
+    expect(f.sent).toHaveLength(1)
+  })
+  it('replays a cursor after binding-save failure and serializes it with a concurrent resume', async () => {
+    const f = await fixture(undefined, true)
+    const store = new FileBindingStore(f.dir)
+    let failures = 1,
+      release: (() => void) | undefined,
+      started: (() => void) | undefined
+    const ready = new Promise<void>((resolve) => {
+      started = resolve
+    })
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let hold = false
+    const runtime = new PaperclipConnectionRuntime({
+      bindingStore: {
+        list: () => store.list(),
+        async open(...args) {
+          const loaded = await store.open(...args)
+          return {
+            ...loaded,
+            save: async (binding) => {
+              if (
+                binding.messageSync?.comments.some(
+                  (c) => c.id === 'binding-retry',
+                )
+              ) {
+                if (failures-- > 0) throw new Error('binding disk unavailable')
+                if (hold) {
+                  hold = false
+                  started?.()
+                  await held
+                }
+              }
+              await loaded.save(binding)
+            },
+          }
+        },
+      },
+      conversationSink: { replace: async () => {} },
+      agentConfigs: {
+        get: async () => f.input.agent,
+        fresh: async (_id, config) => config,
+      },
+      browserTools: new LocalMcpBrowserToolAccess(f.mcpPort, () => ({
+        token: 'local-lease',
+        revoke() {},
+        updateBrowserContext() {},
+      })),
+    })
+    cleanup.push(() => {
+      release?.()
+      return runtime.shutdown()
+    })
+    await runtime
+      .beginTurn({
+        agent: f.input.agent,
+        conversationId: f.input.conversationId,
+        readOnly: true,
+        message: { id: 'start', body: 'Read', hasAttachments: false },
+      })
+      .execute(() => {})
+    await runtime.control(f.input.conversationId, 'pause')
+    const before = f.syncRequests.length
+    f.comments.push({ id: 'binding-retry', body: 'Persist atomically' })
+    hold = true
+    await ready
+    expect(f.syncRequests.length).toBeGreaterThanOrEqual(before + 2)
+    expect(f.syncRequests.at(-1)).toBe(f.syncRequests.at(-2))
     expect(
       runtime
         .state(f.input.conversationId)
-        ?.messages.filter((m) => m.id === 'paperclip-comment-disk-retry'),
-    ).toHaveLength(1)
-    expect(f.sent).toHaveLength(1)
+        ?.messages.some((m) => m.id === 'paperclip-comment-binding-retry'),
+    ).toBe(false)
+    const resuming = runtime.control(f.input.conversationId, 'resume')
+    release?.()
+    await resuming
+    await runtime.shutdown()
+    const persisted = []
+    for await (const binding of store.list()) persisted.push(binding)
+    expect(persisted[0]).toMatchObject({
+      enabled: true,
+      messageSync: { comments: [{ id: 'binding-retry' }] },
+    })
+    expect(f.stats().opens).toBe(1)
   })
   it('persists task and mutation identity across restart and repeated delivery', async () => {
     const f = await fixture()

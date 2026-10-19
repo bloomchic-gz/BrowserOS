@@ -4,6 +4,7 @@ import { z } from 'zod'
 export const CommentSchema = z.object({
   id: z.string(),
   body: z.string(),
+  createdAt: z.string().optional(),
   authorAgentId: z.string().nullish(),
   derivedAuthorAgentId: z.string().nullish(),
   authorUserId: z.string().nullish(),
@@ -17,6 +18,7 @@ export const MessagesSchema = z.object({
   next: z.string().nullable(),
 })
 export const SnapshotSchema = z.object({
+  messageSyncVersion: z.number().int().optional(),
   comments: z.array(CommentSchema),
   liveRuns: z.array(z.unknown()),
   run: z

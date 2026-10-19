@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { PaperclipAgentConfig } from '@browseros/shared/schemas/agent'
 import { z } from 'zod'
+import { MessageSyncStateSchema } from './paperclip-message-sync'
 
 type Json = Record<string, unknown>
 export type SentMessage = {
@@ -16,6 +17,7 @@ export type Binding = {
   version: 1
   identity: string
   request: Json
+  messageSync?: z.infer<typeof MessageSyncStateSchema>
   taskId?: string
   messages?: Record<string, SentMessage>
 }
@@ -26,6 +28,8 @@ const bindingSchema = z
     identity: z.string().min(1),
     request: z.record(z.string(), z.unknown()),
     taskId: z.string().min(1).optional(),
+    // Derived cache can be rebuilt without replacing the durable Task identity.
+    messageSync: MessageSyncStateSchema.optional().catch(undefined),
     messages: z
       .record(
         z.string(),

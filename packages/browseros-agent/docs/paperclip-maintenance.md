@@ -85,7 +85,7 @@ flowchart TB
 
 以后上游变更 Agent 数据库、UI 消息或聊天流接口时，优先调整对应适配层；连接核心和原有验收保持稳定。业务源码仅调整自有集成文件，没有增加对 ACP 分派、HTTP 路由、UI 组件的补丁。本轮没有数据迁移、wire 协议变化或新增调度器。
 
-这是仓库内接口，不是稳定公开插件 API。BrowserToolAccess 已按下面的边界提取；消息同步仍为全量分页，仍使用现有 AI SDK 渲染，未改成新的增量消息协议。
+这是仓库内接口，不是稳定公开插件 API。BrowserToolAccess 已按下面的边界提取；消息同步现由 `paperclip-message-sync.ts` 负责增量分页和本地缓存，仍使用现有 AI SDK 渲染。旧服务未声明能力时沿用全量协议。
 
 ## 浏览器工具边界
 
@@ -187,3 +187,26 @@ BrowserToolAccess 拆分后的当轮验证与首次失败记录见 Paperclip `te
 本轮调整 Paperclip 内部分派接入，并补齐数据库故障掩盖 Machine 断线时的未知结果保护；BrowserOS 的绑定、团队消息、暂停/Stop、BrowserToolAccess 和协议没有改动。真实 Codex、故障与硬重启的当轮结果见 Paperclip `tests/browseros-machine-acceptance/machine-dispatch-validation-2026-10-19.md`。
 
 已分派的绑定 Machine Task 若以通用 `adapter_failed` 结束且没有启动前失败证据，Paperclip 不自动重试浏览器动作；连接恢复、旧执行确认停止后，用户在任一端发新消息继续。普通任务和明确限流仍沿原重试策略。
+
+## 增量消息同步（2026-10-19）
+
+`paperclip-message-sync.ts` 是评论传输边界：通过 snapshot 的 `messageSyncVersion: 1` 协商，调用 `/message-changes?cursor=...` 并处理 reset、评论 upsert 和删除标记。请求每页最多 100 项，保存前按数据库完整微秒精度排好创建顺序，稳定 ID 和原 `projectPaperclipMessages` 继续负责本地回声、团队作者与最终结果替换。
+
+```mermaid
+flowchart LR
+  P["Paperclip Task 评论"] --> J["数据库事务变更索引"]
+  J -->|"游标后的新增、编辑、删除"| S["Message Sync 临时缓存"]
+  S --> C["原消息投影 / ConversationSink"]
+  C -->|"保存成功"| B["绑定文件：缓存 + 游标"]
+  B -->|"断线 / 后台重启续传"| S
+```
+
+连接核心在对话落库后，把缓存、游标、Run 日志偏移和 transcript 串行写入绑定文件，成功后才更新内存确认状态。发送回执和暂停/恢复共用这条写队列，避免状态互相覆盖。网络、响应丢失、对话或绑定保存失败均保留旧游标重读，不新建 Task，不重发浏览器操作。暂停期间同步继续；空闲增量不返回评论正文，也不重复写本地绑定。
+
+绑定主版本仍为 v1，新增可选 `messageSync: {version: 1, cursor, comments}`。旧绑定直接首次建缓存；派生缓存损坏或版本不支持时丢弃缓存并重读，Task/requestId/启用状态保留；主绑定损坏或未来主版本仍拒绝读取。旧 Paperclip 未声明能力时走 `/messages`，新服务保持旧客户端可用。增量请求的权限、网络和解析错误不触发静默降级。
+
+Paperclip 的 0357 迁移为已有绑定回填评论变更索引，不需要 BrowserOS 手动迁移。秘密脱敏、历史结果投影变化触发重建；另外每五分钟保守全量校准，覆盖外部日志/用户资料变化。当前仍每两秒观察执行状态，ACP 日志输出逻辑保留；不是推送协议，也不承诺彻底消除全量读取。超出 1000 页的单轮同步显式报错，不丢页或推进游标。
+
+验收补充 `paperclip-message-sync.test.ts` 与增量 runtime 用例：旧服务兼容、排序/删除、重读、缓存版本、本地写失败、并发 Resume、暂停与后台恢复。完整服务入口在 Paperclip `tests/browseros-machine-acceptance/faults/full-stack.ts --scenario messages`；实际结果统一见该仓库本轮验收记录。后续跟随上游主要检查 Comment DTO、ConversationSink 和绑定原子保存行为。
+
+本轮最终通过 2,163 项 BrowserOS 测试及工作区检查/构建；两仓完整测试、205 条历史增量实测、真实 Codex、故障与硬重启证据见 Paperclip `tests/browseros-machine-acceptance/incremental-sync-validation-2026-10-19.md`。该记录保留条件跳过、首次失败与覆盖范围。

@@ -4,8 +4,6 @@ import { z } from 'zod'
 import type { Binding, SentMessage } from './paperclip-binding'
 import type { BindingStore } from './paperclip-binding-store'
 import {
-  type CommentSchema,
-  MessagesSchema,
   PollSchema,
   paperclipRequest,
   SnapshotSchema,
@@ -16,6 +14,7 @@ import {
   projectPaperclipMessages,
   type RunOutput,
 } from './paperclip-conversation'
+import { readPaperclipMessages } from './paperclip-message-sync'
 import type {
   AgentConfigProvider,
   BrowserToolAccess,
@@ -33,10 +32,14 @@ type PersistentBinding = Binding &
     transcript?: PaperclipMessage[]
     outputs?: Record<string, RunOutput>
   }
+type SyncState = Pick<
+  PersistentBinding,
+  'messageSync' | 'outputs' | 'transcript'
+>
 type Worker = {
   binding: PersistentBinding
   config: PaperclipAgentConfig
-  save: (binding: Binding) => Promise<void>
+  save: (patch?: SyncState) => Promise<void>
   controller: AbortController
   call?: AbortController
   leaseId?: string
@@ -122,14 +125,24 @@ export class PaperclipConnectionRuntime {
   private register(
     binding: PersistentBinding,
     config: PaperclipAgentConfig,
-    save: Worker['save'],
+    save: (binding: Binding) => Promise<void>,
   ) {
     const existing = this.workers.get(binding.conversationId)
     if (existing) return existing
+    let writes: Promise<void> = Promise.resolve()
     const worker: Worker = {
       binding,
       config,
-      save,
+      save: (patch) => {
+        // Serialize sync commits with pause and send receipts. Read the latest
+        // binding inside the queue so a concurrent write cannot lose a cursor.
+        const next = writes.then(async () => {
+          await save({ ...binding, ...patch })
+          Object.assign(binding, patch)
+        })
+        writes = next.catch(() => undefined)
+        return next
+      },
       controller: new AbortController(),
       status: binding.enabled ? 'connecting' : 'paused',
     }
@@ -265,33 +278,28 @@ export class PaperclipConnectionRuntime {
   // IDs make restart/reconnect idempotent; no synchronized message is submitted.
   private async sync(worker: Worker, signal: AbortSignal) {
     const b = worker.binding
+    if (!b.taskId) throw new Error('Paperclip task binding is missing.')
     const snapshot = SnapshotSchema.parse(
-      await this.api(worker, `/tasks/${b.taskId}/snapshot`, undefined, signal),
+      await this.api(
+        worker,
+        `/tasks/${b.taskId}/snapshot?includeComments=false`,
+        undefined,
+        signal,
+      ),
     )
     worker.snapshot = snapshot
     worker.taskUrl = snapshot.taskUrl
     if (worker.call && !snapshot.liveRuns.length) worker.call.abort()
-    const comments: z.infer<typeof CommentSchema>[] = []
-    let after: string | null = null
-    do {
-      const page: {
-        comments: z.infer<typeof CommentSchema>[]
-        next: string | null
-      } = MessagesSchema.parse(
-        await this.api(
-          worker,
-          `/tasks/${b.taskId}/messages${after ? `?after=${after}` : ''}`,
-          undefined,
-          signal,
-        ),
-      )
-      comments.push(...page.comments)
-      after = page.next
-    } while (after && !signal.aborted)
-    b.outputs ??= {}
+    const { comments, messageSync } = await readPaperclipMessages(
+      (path) => this.api(worker, path, undefined, signal),
+      b.taskId,
+      snapshot.messageSyncVersion === 1,
+      b.messageSync,
+    )
+    const outputs = structuredClone(b.outputs ?? {})
     if (snapshot.run) {
       const run = snapshot.run
-      const output = b.outputs[run.id] ?? {
+      const output = outputs[run.id] ?? {
         offset: 0,
         text: '',
         status: run.status,
@@ -299,7 +307,7 @@ export class PaperclipConnectionRuntime {
       const log = SnapshotSchema.parse(
         await this.api(
           worker,
-          `/tasks/${b.taskId}/snapshot?runId=${run.id}&logOffset=${output.offset}`,
+          `/tasks/${b.taskId}/snapshot?runId=${run.id}&logOffset=${output.offset}&includeComments=false`,
           undefined,
           signal,
         ),
@@ -311,12 +319,12 @@ export class PaperclipConnectionRuntime {
       output.status = run.status
       if (!activeStatuses.includes(run.status) && !output.text)
         output.text = run.resultJson?.summary ?? `Paperclip run ${run.status}.`
-      b.outputs[run.id] = output
+      outputs[run.id] = output
     }
     const messages = projectPaperclipMessages(
       comments,
       b.messages ?? {},
-      b.outputs,
+      outputs,
     )
     if (JSON.stringify(messages) !== JSON.stringify(b.transcript)) {
       // A failed sink write must be retried on the next reconciliation. Only
@@ -326,9 +334,18 @@ export class PaperclipConnectionRuntime {
         messages,
         agentId: b.agentId,
       })
-      b.transcript = messages
     }
-    await worker.save(b)
+    signal.throwIfAborted()
+    const patch = { messageSync, outputs, transcript: messages }
+    if (
+      JSON.stringify(patch) !==
+      JSON.stringify({
+        messageSync: b.messageSync,
+        outputs: b.outputs,
+        transcript: b.transcript,
+      })
+    )
+      await worker.save(patch)
   }
   state(conversationId: string) {
     const w = this.workers.get(conversationId)
@@ -361,7 +378,7 @@ export class PaperclipConnectionRuntime {
         )
       w.leaseId = undefined
       w.status = 'paused'
-      await w.save(w.binding)
+      await w.save()
     } else {
       const agent = await this.getAgent(w.binding.agentId)
       const config = agent?.paperclipConfig
@@ -373,7 +390,7 @@ export class PaperclipConnectionRuntime {
         throw new Error('Connection changed. Start a new conversation.')
       w.config = config
       w.binding.enabled = true
-      await w.save(w.binding)
+      await w.save()
       this.start(w)
     }
     return this.state(conversationId)
@@ -385,7 +402,7 @@ export class PaperclipConnectionRuntime {
     w.syncController?.abort()
     await w.sync
     w.binding.deleted = true
-    await w.save(w.binding)
+    await w.save()
     this.workers.delete(conversationId)
   }
   async shutdown() {
@@ -527,7 +544,7 @@ export class PaperclipConnectionRuntime {
         ...(binding.localSettings !== fingerprint ? { settings } : {}),
       }
       binding.messages[latest.id] = sent
-      await worker.save(binding)
+      await worker.save()
     }
     await this.api(
       worker,
@@ -541,7 +558,7 @@ export class PaperclipConnectionRuntime {
     )
     if (sent.settings) {
       binding.localSettings = JSON.stringify(sent.settings)
-      await worker.save(binding)
+      await worker.save()
     }
     return { worker, sent, baseline }
   }
