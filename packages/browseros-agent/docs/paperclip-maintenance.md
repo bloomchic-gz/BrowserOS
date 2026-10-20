@@ -230,3 +230,11 @@ Paperclip 在每轮注入绑定 Task 的浏览器、团队协作、暂停和结�
 Codex 使用每 Run 的工具别名和进程凭据，避免写入共享配置；Claude 每 Run 使用独立严格 MCP 配置，暂停时为空配置。两者沿用现有租约撤销、Stop 取消和未知结果保护。协议完整说明在 Paperclip `doc/integrations/browseros-contracts.md`；可重复验收的私有配置增加 `engine: "cli"`，使用同一七阶段 live 脚本。故障夹具支持两个 CLI 的 server/database/both 硬重启，确定性夹具与真实模型验收分别报告。
 
 本轮验证与首次失败统一记录在配套 Paperclip 仓库 `tests/browseros-machine-acceptance/native-cli-validation-2026-10-19.md`，包含真实 Codex/Claude CLI、普通 ACP 隔离、独立服务故障和 Runner 强杀验收；不要用确定性夹具结果替代真实模型结果。
+
+## 2026-10-20 上游合并
+
+本轮从远端重新 clone，在独立本地分支合入 BrowserOS 上游 `ca125dcc2` 的五个提交；配套 Paperclip 合入 `96824a71d` 的 107 个提交。BrowserOS 无文本冲突，原有一对话一 Task、常驻连接、双向增量消息、设置与工具租约接入保持不变。
+
+Paperclip 上游默认 Claude native `paperclip_runner` 尚不支持本通道，必须继续明确拒绝该执行路径；Codex/Claude legacy CLI 和 ACP 仍按原配置执行。配套数据库冻结自有 0355–0357，上游同号迁移顺延，升级前需停止旧控制端写入。
+
+两仓本轮命令、结果、首次失败与剩余范围统一记录在配套 Paperclip 的 `tests/browseros-machine-acceptance/upstream-merge-validation-2026-10-20.md`。仅集成分支允许推送；默认分支和 Actions 设置不属于此次变更。
