@@ -371,3 +371,16 @@ BrowserOS 本机 checkout 快进至 `2a6dd8566`，仅维护文档变化，运行
 只读前后 10 个浏览器页面的 ID/URL 摘要完全一致，未新建、关闭或导航页面。
 原有 571 条评论全部保留，仅在该 Task 新增两条验收评论；其他数据数量和配置哈希不变。
 此处是部署后的只读真实通路复核，不把它计作另一轮故障矩阵。
+
+## Machine native 移植实验（2026-10-22）
+
+Paperclip 已增加测试专用驱动，真实 Machine CLI/worker 启动 Linux `paperclip-runnerd`，
+经认证 WSS 使用真实 Codex 和专用 BrowserOS 页面，完成同 provider session 两轮及故障观察。
+它不接入生产 heartbeat/数据库/BrowserOS 对话绑定，不能把同 provider session 当作同 Task。
+worker 强杀后曾短暂保留 4 个原生相关进程，控制端关闭后才退出；新 Machine 缺少旧执行的
+停止回执，因此生产 native Machine 准入仍关闭，原 CLI/ACP 与本地 native 配置不变。
+Claude native Machine 也尚未实现或验收，仍需受构建清单授权的 Linux provider 包。
+
+升级时继续使用现有准入规则，不能只把 `paperclip_runner` 加入 Machine 支持列表。
+复用代码、实际结果与下一步所需的持久所有权和停止证明，见
+[Machine native 实验记录](https://github.com/bloomchic-gz/paperclip/blob/codex/browseros-machine-integration-20261018/tests/browseros-machine-acceptance/machine-native-spike-validation-2026-10-22.md)。
