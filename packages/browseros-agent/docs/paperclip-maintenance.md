@@ -250,3 +250,75 @@ Native 工具使用固定 `browseros_list_tools`、`browseros_call_tool` 名称�
 当前 native browser dispatch 限定 Paperclip 本地 macOS/Linux 环境（真实验收为 macOS arm64）；native remote/sandbox 会明确返回不支持原因。跨主机执行继续使用原有 Machine CLI/ACP。控制端在浏览器动作前持久化 OS 进程身份，重启后只清理核实的 Runner/provider 及其后续子进程组；全部物理退出后才能释放租约。未知身份保留阻塞状态，不会显示成成功停止。
 
 配套维护点、真实 Codex/Claude 浏览器与故障验收、历史失败和局限见 Paperclip 的 `doc/integrations/browseros-maintenance.md` 及 `tests/browseros-machine-acceptance/native-runner-validation-2026-10-21.md`。native 的跨主机运行、其他 provider profile、整浏览器进程崩溃仍需独立资格验证，不从旧 Machine 证据推断。
+
+## 本机部署与 Codex / Claude 接入手册（2026-10-21）
+
+本次将现有 macOS arm64 实例更新到 BrowserOS 源码 `f6e20b1c5`、Paperclip `b377e5af9`，随后连接 CLI Trio 的 native Codex 与 Claude。已安装 BrowserOS `0.51.0` Chromium 二进制不变，升级范围是 Bun 服务、开发扩展和 Paperclip release。没有把旧 CLI/ACP 改成 native，也没有新增 BrowserOS provider 分支或绕过准入。
+
+Paperclip 的数据库、release、Agent 配置与 Claude provider-root 修复详见配套 [本机部署维护手册](https://github.com/bloomchic-gz/paperclip/blob/codex/browseros-machine-integration-20261018/doc/integrations/browseros-maintenance.md#本机部署与-codex--claude-接入手册2026-10-21)。本轮完整结果、首次失败及未覆盖项见 [本机部署验收](https://github.com/bloomchic-gz/paperclip/blob/codex/browseros-machine-integration-20261018/tests/browseros-machine-acceptance/local-deployment-validation-2026-10-21.md)。下面的端口、目录名是本次实例记录，后续升级先读取实际启动配置。
+
+### 更新现有服务和扩展
+
+1. 记录原 checkout SHA、Bun 路径、服务启动命令、环境文件、数据目录、已安装扩展及实际 Chromium `--user-data-dir`。备份数据、profile、sidecar 和启动配置；私密文件留在受限目录。此次 BrowserOS 数据在 `~/.browseros-dev`，浏览器使用原开发启动器指定的独立 profile，不能假定 profile 就是数据目录。
+2. 在独立 checkout 完成验证后，正常停止相关服务，再将实际运行 checkout 快进到目标集成提交。保留 `.env.development`、`config.dev.json` 及 `<profile>/sidecars/browseros-server.json`。不要以新 profile 验收成功代替旧数据升级成功，也不要使用会清空用户数据的 reset/cleanup 命令。
+3. 本次用 Bun `1.4.2`，在 `packages/browseros-agent` 执行以下构建。空 Sentry token 用于本地构建不上传 sourcemap；不是远端发布步骤。
+
+   ```sh
+   bun install --frozen-lockfile
+   SENTRY_AUTH_TOKEN='' bun run build:agent:dev
+   ```
+
+4. 开发扩展产物在 `apps/app/dist/chrome-mv3-dev`；服务继续使用 Bun 执行 `apps/server/src/index.ts`，加载原 `.env.development` 和既有 sidecar 配置。保留原浏览器 launch 参数及 profile，加载新扩展；沿用本机已有的禁用 bundled server/extension 设置，避免同时启动两套服务。不要把某台机器的开发 keychain 参数复制为通用升级要求。
+5. 本次用 launchd 管理 `com.browseros.local-app`、`com.browseros.local-server`、`com.browseros.local-web`，均 RunAtLoad；后两项 KeepAlive，浏览器本身不设 KeepAlive。记录并备份实际 plist，不把含环境变量的原件提交到 Git。端口为 server 9435、CDP 9705、扩展 9324、静态预览 5175；CDP 仅监听 loopback，不能为远程 Runner 暴露调试端口。
+6. 重启后要求 `GET http://127.0.0.1:9435/system/health` 为 ok 且 `cdpConnected: true`，再确认原 provider、conversation、绑定和扩展 UI 可读。静态网页 200 只证明预览页面可访问，不能代替连接、写权限和实际工具验收。
+
+此次旧源码 `3d76663be` 快进到 `f6e20b1c5`，原 `.env.development` 字节未变、`config.dev.json` 保留；原 provider 和 conversation 各 1 条内容未变。Paperclip 保留原实例，经过存量备份还原演练后执行 33 项迁移。旧 `localhost:3102` Paperclip 连接及其历史保留，新连接使用 `http://127.0.0.1:3100`。
+
+### 连接 CLI Trio 的 native Agent
+
+1. Paperclip 服务设置准确的 `PAPERCLIP_PUBLIC_URL`，通过正常实例 API 启用 Public MCP。BrowserOS URL、登录页、OAuth resource 必须同 origin；本次统一 `http://127.0.0.1:3100`。Paperclip 管理 CLI 登录与 BrowserOS OAuth 分开处理。
+2. 在 Paperclip 的目标公司新增独立 `paperclip_runner` Agent，保留原 `codex_local` / `claude_local` 的 engine、模型、认证、上下级和 execution environment。两种 native 配置如下；完整 JSON、Secret 引用和环境探针见 Paperclip 手册。
+
+   | 连接 | Paperclip adapterConfig | 本次模型 / effort |
+   | --- | --- | --- |
+   | CLI Trio · Native Codex | `provider: "codex"` | `gpt-6.1-sol` / `low` |
+   | CLI Trio · Native Claude | `provider: "acpx", acpxAgent: "claude"` | `claude-sonnet-4-6` / `low` |
+
+   两者 `runner: "paperclip"`，使用受控本地 workspace。验收 Agent 关闭 heartbeat 定时唤醒。Codex 使用有效登录，本机 CLI 为 `0.163.0`；Claude 使用既有授权 endpoint，token 存成公司 Secret，不能把 CLI 配置中的明文复制到 BrowserOS。这里 ACPX 是 native Runner 内的 Claude bridge，旧 CLI/ACP 执行路径保持独立。
+3. 等 Paperclip environment check 和 Agent lifecycle ready 后，在 BrowserOS 的 Paperclip 连接界面输入新 URL，完成 device OAuth。授权页明确选择 **CLI Trio**，确认 `paperclip:read paperclip:write offline_access`，然后选择对应 remote Agent、模型/effort。不要默认使用页面预选公司，也不要用 configure scope 扩大权限。
+4. 给 Codex、Claude 分别建立稳定连接身份；不要复用另一个连接的轮换 refresh token，或覆盖旧连接的 URL、remoteAgentId、clientId。旧对话绑定继续属于原连接。创建后核对 UI 标签、公司、连接状态与实际 Task 链接。
+
+可维护的 API 边界是 `POST /agents/paperclip/connect`（注册 client、申请 device code）、`POST /agents/paperclip/token`（兑换）、`POST /agents/paperclip/connection`（用 token 发现可用连接信息）及 `POST /agents`（`type: "paperclip"`，保存 `paperclipConfig`）。授权维护脚本应先私下持久化成功兑换的 token/refresh，再创建 provider，避免后一步失败丢失一次性 grant。不要把 token 放进命令行、文档或版本库。
+
+这些写接口受 trusted-origin 保护。本次安装的开发扩展 ID 为 `bflpfmnmnokmjhmgnolecpppdbdophmk`，其 Origin 为 `chrome-extension://bflpfmnmnokmjhmgnolecpppdbdophmk`。后续必须从实际安装与信任配置核实 ID，不能照抄。初次 helper 用 `http://127.0.0.1:9435` 作 Origin 得到 403，省略 Origin 同样不通过；实际修正使用已信任扩展的授权流程，没有禁用 origin/CSRF 校验或添加通配符。5175 预览页不自动获得扩展权限。
+
+### Claude 启动失败的部署修复
+
+本次 Paperclip 是 pnpm workspace release，Claude 的环境探针把 `server` 当作 provider root，而锁定依赖实际解析到 release 根的 `node_modules/.pnpm`，导致 `acpx_runtime_unavailable`。在核实同一受控 release 的真实布局后，为 **Paperclip 服务** 增加：
+
+```text
+PAPERCLIP_ACPX_PROVIDER_PACKAGE_ROOT=<canonical-absolute-release-root>
+PAPERCLIP_ACPX_PROVIDER_PACKAGE_MANIFEST=<same-release-root>/server/package.json
+```
+
+确认没有 queued/running Run 后正常重启 Paperclip，重跑 `paperclip_runner/test-environment`，必要时执行 Agent lifecycle retry，直到 `acpx_runtime_ready` 与 ready。保持全部既有环境值，下一次换 release 同步更新这两条绝对路径。这不是 BrowserOS 配置，也不是 npm/provider-pack 安装的通用修复；不得放宽依赖完整性、允许越界依赖或仅修改准入来掩盖问题。本次没有源代码修改，完整检查已通过；Paperclip 重启后原 native Codex 连接仍 online、仍绑定原 Task。
+
+### 真实验收结果与复用标准
+
+本次实际 BrowserOS 和模型通过以下验收；主要操作经 API 驱动，UI 复核标签、online、回复、Task 链接和浏览器页面。它不等于完整点击式配置流程验收。
+
+| 阶段 | Native Codex：CLI-48 | Native Claude：CLI-49 |
+| --- | --- | --- |
+| 初次浏览器操作 | tabs / snapshot / evaluate 成功 | tabs / snapshot / evaluate 成功 |
+| 同对话续聊 | 同 Task，实际只读调用通过 | 同 Task，实际只读调用通过 |
+| Stop | 实际等待期间取消；5 个所属 PID 全部物理退出 | 修正提示后实际等待期间取消；8 个所属 PID 全部物理退出 |
+| 显式恢复 | 原 Task、原页面，工具成功、done / online | 原 Task、原页面，工具成功、done / online |
+| 配置保留 | 接入 Claude 后仍 online | 新增前的 9 个 CLI Trio Agent 配置逐字段一致 |
+
+两路分别用带唯一标记的 Example Domain 页面，并通过独立 CDP 清单确认各目标页仅有一份。再次升级时使用专用对话/页面，记录真实 runtime profile、模型/effort、Task/Run ID、completed 浏览器回执及进程退出证据；同 Task 续聊和恢复必须读到既有页。
+
+Stop 验收需明确说明受控取消目的，先确认无副作用的前台 sleep 真正开始，再发 Stop，要求 Run cancelled 且该 Run 所属进程树全部退出。Claude 首次提示没有说明目的，模型拒绝等待，故那次没有测试到 Stop；保留失败记录后，在同一 Task 用明确的 sleep 120 测试通过。停止确认后发显式新用户消息恢复，不能以 Retry、清 session、新 Task 或自动重放未知浏览器动作替代恢复证明。
+
+本次也保留了错误 Origin、一次性 OAuth 兑换后 provider 创建失败、迁移核对脚本主键错误等首次记录。OAuth 重做留下两条 Codex 同范围同意记录，当前仅保存最终有效凭据；未声称旧授权已撤销，清理前须核对具体 grant/client。
+
+共享本机实例仅执行上述授权范围的专用 Task 验收，没有注入全局数据库故障或强杀浏览器。此次未重跑 legacy CLI/ACP、远程 Runner、团队同步、Pause、普通 Task 或其他模型全矩阵，也没有重编译 Chromium。隔离环境的完整 native 故障资格仍以此前 Paperclip `native-runner-validation-2026-10-21.md` 为准；不能把这次 Stop 恢复或旧模拟测试当成新的故障矩阵通过。native remote/sandbox 仍不支持。
