@@ -322,3 +322,36 @@ Stop 验收需明确说明受控取消目的，先确认无副作用的前台 sl
 本次也保留了错误 Origin、一次性 OAuth 兑换后 provider 创建失败、迁移核对脚本主键错误等首次记录。OAuth 重做留下两条 Codex 同范围同意记录，当前仅保存最终有效凭据；未声称旧授权已撤销，清理前须核对具体 grant/client。
 
 共享本机实例仅执行上述授权范围的专用 Task 验收，没有注入全局数据库故障或强杀浏览器。此次未重跑 legacy CLI/ACP、远程 Runner、团队同步、Pause、普通 Task 或其他模型全矩阵，也没有重编译 Chromium。隔离环境的完整 native 故障资格仍以此前 Paperclip `native-runner-validation-2026-10-21.md` 为准；不能把这次 Stop 恢复或旧模拟测试当成新的故障矩阵通过。native remote/sandbox 仍不支持。
+
+## 真实故障矩阵的复用要求（2026-10-21）
+
+本轮补验使用真实 Codex / Claude 与独立 BrowserOS 页面，覆盖本地 native 和 Docker Linux
+Machine CLI/ACP。控制端及数据库均为隔离实例，日常 profile、旧连接、Agent 和共享数据库不参与故障注入。
+具体逐项结果和首次失败统一保存在 Paperclip 的
+[真实故障矩阵记录](https://github.com/bloomchic-gz/paperclip/blob/codex/browseros-machine-integration-20261018/tests/browseros-machine-acceptance/real-fault-matrix-validation-2026-10-21.md)，
+复用入口见
+[故障脚本说明](https://github.com/bloomchic-gz/paperclip/blob/codex/browseros-machine-integration-20261018/tests/browseros-machine-acceptance/faults/README.md#真实模型的完整矩阵)。
+
+恢复成功须同时满足：同一 Task、已被控制端接受的真实工具结果、恰好一次副作用、Run succeeded、
+Task done、旧执行物理退出与租约结算。CLI 正常退出但 Task blocked，或只看到点击计数，均不足以通过。
+本轮 `criteriaVersion: 2` 增加了这些判据；此前判据较弱或主动中断的尝试保留为诊断。
+未知动作后的自动重放仍直接失败。legacy 若在浏览器执行前触发上游 disposition 修复，还需核对两个持久来源字段、最多两步的 episode、相同原始用户评论 ID，以及此前零浏览器调用/回执；此规则不适用于 native，也不授予未知动作重放权。暂停后重启要保留 paused、禁止工具、继续同步消息，之后显式恢复。
+
+每条并发路径用独立 browser profile/CDP 端口；16 GB 机器最多两条。专用 headless 页面关闭后台
+节流，CDP 超时后仍禁止重试未知求值。长时间故障场景正常轮换自己的短期 OAuth 凭据；不更改共享连接。
+Docker 验证真实 Machine 协议、远端进程和网络隔离，不等同于物理主机掉电、公网 TLS 或生产网页全流程。
+ACP 必须核对底层 runtime 和仓库补丁，不能以宿主 CLI 的版本代替。
+
+配套 Paperclip 修复了 Claude CLI 成功终态后清理残留进程被误记失败的问题：只有成功终态与可信的
+物理清理证据同时存在才判成功，失败或外部强杀仍保留失败。BrowserOS 的 CLI/ACP 配置、绑定和工具协议不变。
+Machine native 移植仍需独立的远端所有权、停止回执和真实验收，不能由本轮 legacy 结果推断准入。
+
+本轮另外复核并停用了 fork 的 29 个现有 Actions 工作流（`disabled_manually`）。
+仓库级 Actions 策略接口对当前账号返回 403，故未声称已核对该总开关；工作流文件和默认
+`main` 未改动。以后合入新增工作流须重新检查其状态。
+
+另有 8 项执行 worker / 整容器强杀真实补验，四条 CLI/ACP 路径均保持未知动作不重放，
+停止回执缺失时保存但阻止新消息。它们属于安全保持，不是自动恢复；新连接不能代替旧执行
+终止证明。Claude CLI worker 强杀后曾观察到残留 provider，由仅属于测试的容器清理结束。
+
+截至 2026-10-22，六条真实路径的基础矩阵全部完成：两条本地 native 各 12 项、四条 Docker Machine CLI/ACP 各 13 项，共 76 项通过，且每条 suite 的启动与清理通过。8 项硬故障安全保持另计；详细首次失败、模型与平台范围以关联报告为准。
