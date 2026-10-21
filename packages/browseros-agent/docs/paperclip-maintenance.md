@@ -29,9 +29,9 @@ Runner 和 BrowserOS 都主动连接 Paperclip；远程 Agent 的浏览器请求
 
 长期按能力接入所有 Agent，不在 BrowserOS 固化 Codex/Claude 品牌名单。Paperclip 负责统一能力发现和服务端准入，Runner 负责执行机探测与 provider 适配，BrowserOS 共用绑定、同步和工具执行链路。模型与思考强度按远端声明展示，不支持的选项明确说明。
 
-能参与任务和能实际控制浏览器需要分别验证；缺少 Run 专属工具通道的 Agent 应补齐适配，不能把纯文本输出算作浏览器执行成功。当前支持 ACP，以及 Codex/Claude 原生 CLI；其他执行方式满足相同任务、工具、暂停、取消与结果契约也可接入。
+能参与任务和能实际控制浏览器需要分别验证；缺少 Run 专属工具通道的 Agent 应补齐适配，不能把纯文本输出算作浏览器执行成功。当前支持 ACP、Codex/Claude 原生 CLI，以及配套 Paperclip 的 native Codex/Claude Runner；其他执行方式满足相同任务、工具、暂停、取消与结果契约也可接入。
 
-当前服务端通过统一能力入口注册 Codex/Claude 的 CLI/ACP 双路径，以及 Kiro、Hermes、Grok 的 ACP 路径；界面使用远端模型/effort 能力，支持手工模型 ID，并显示不可用 Agent 的原因。注册不等于当前机器已登录或已通过真实验收；各 Agent 的结果、外部额度限制和缺口见 Paperclip 的 `tests/browseros-machine-acceptance/implementation-2026-10-18.md`。完整能力契约与覆盖状态维护在 Paperclip 的 `doc/integrations/browseros-contracts.md`（R16–R17）。
+当前服务端通过统一能力入口注册 Codex/Claude 的 CLI/ACP 双路径、Kiro、Hermes、Grok 的 ACP 路径，以及 `paperclip_runner` 的 Codex、Claude/ACPX profile；界面使用远端模型/effort 能力，支持手工模型 ID，并显示不可用 Agent 的原因。注册不等于当前机器已登录或已通过真实验收；各 Agent 的结果、外部额度限制和缺口见 Paperclip 的 `tests/browseros-machine-acceptance/implementation-2026-10-18.md`。完整能力契约与覆盖状态维护在 Paperclip 的 `doc/integrations/browseros-contracts.md`（R16–R17）。
 
 ## 核心和可替换接入
 
@@ -235,6 +235,18 @@ Codex 使用每 Run 的工具别名和进程凭据，避免写入共享配置；
 
 本轮从远端重新 clone，在独立本地分支合入 BrowserOS 上游 `ca125dcc2` 的五个提交；配套 Paperclip 合入 `96824a71d` 的 107 个提交。BrowserOS 无文本冲突，原有一对话一 Task、常驻连接、双向增量消息、设置与工具租约接入保持不变。
 
-Paperclip 上游默认 Claude native `paperclip_runner` 尚不支持本通道，必须继续明确拒绝该执行路径；Codex/Claude legacy CLI 和 ACP 仍按原配置执行。配套数据库冻结自有 0355–0357，上游同号迁移顺延，升级前需停止旧控制端写入。
+该次合并时 Paperclip 上游默认 Claude native `paperclip_runner` 尚不支持本通道，故继续拒绝；2026-10-21 的独立适配见下节。Codex/Claude legacy CLI 和 ACP 仍按原配置执行。配套数据库冻结自有 0355–0357，上游同号迁移顺延，升级前需停止旧控制端写入。
 
 两仓本轮命令、结果、首次失败与剩余范围统一记录在配套 Paperclip 的 `tests/browseros-machine-acceptance/upstream-merge-validation-2026-10-20.md`。仅集成分支允许推送；默认分支和 Actions 设置不属于此次变更。
+
+## Native Paperclip Runner（2026-10-21）
+
+BrowserOS 继续使用现有 OAuth、一个对话一个 Task、常驻工具连接和增量消息协议。新的适配在 Paperclip 控制端：native Codex/Claude 通过 PRP dynamic tools 调用同一 browser broker，BrowserOS 不启动第二套 provider，不保存远端 CLI 凭据。旧 CLI/ACP、Machine Runner 和本地暂停/恢复逻辑保留。
+
+Native 工具使用固定 `browseros_list_tools`、`browseros_call_tool` 名称，具体浏览器 schema 仍由当前连接提供。每个动作先在 Run 写 pending；未知结果不自动重放。恢复连接不等于恢复动作。新的用户消息须经过 Paperclip 的进程、租约、持久化身份和停止收据验证，才能开始新的 native session。
+
+模型/effort 由 Paperclip 配置的 native provider profile 声明；BrowserOS 仍只写当前 Task override。native 输出仅同步脱敏后的助手 final/commentary；工具正文和 reasoning 不进入对话投影。API/绑定版本无需升级。
+
+当前 native browser dispatch 限定 Paperclip 本地 macOS/Linux 环境（真实验收为 macOS arm64）；native remote/sandbox 会明确返回不支持原因。跨主机执行继续使用原有 Machine CLI/ACP。控制端在浏览器动作前持久化 OS 进程身份，重启后只清理核实的 Runner/provider 及其后续子进程组；全部物理退出后才能释放租约。未知身份保留阻塞状态，不会显示成成功停止。
+
+配套维护点、真实 Codex/Claude 浏览器与故障验收、历史失败和局限见 Paperclip 的 `doc/integrations/browseros-maintenance.md` 及 `tests/browseros-machine-acceptance/native-runner-validation-2026-10-21.md`。native 的跨主机运行、其他 provider profile、整浏览器进程崩溃仍需独立资格验证，不从旧 Machine 证据推断。
