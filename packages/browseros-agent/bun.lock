@@ -147,7 +147,7 @@
     },
     "apps/claw-app": {
       "name": "@browseros/claw-app",
-      "version": "0.2.40",
+      "version": "0.2.41",
       "dependencies": {
         "@base-ui/react": "^1.8.0",
         "@browseros/claw-api": "workspace:*",
@@ -212,7 +212,7 @@
     },
     "apps/claw-onboard": {
       "name": "@browseros/claw-onboard",
-      "version": "0.0.16",
+      "version": "0.0.17",
       "dependencies": {
         "@base-ui/react": "^1.8.0",
         "@browseros/shared": "workspace:*",
@@ -311,6 +311,10 @@
     },
     "crates/harness-integrations": {
       "name": "@browseros/harness-integrations-rust",
+      "version": "0.0.0",
+    },
+    "crates/hosted-api": {
+      "name": "@browseros/hosted-api-rust",
       "version": "0.0.0",
     },
     "packages/acpx-ai-provider": {
@@ -653,6 +657,8 @@
     "@browseros/diagnostics": ["@browseros/diagnostics@workspace:packages/diagnostics"],
 
     "@browseros/harness-integrations-rust": ["@browseros/harness-integrations-rust@workspace:crates/harness-integrations"],
+
+    "@browseros/hosted-api-rust": ["@browseros/hosted-api-rust@workspace:crates/hosted-api"],
 
     "@browseros/onboarding-video": ["@browseros/onboarding-video@workspace:packages/onboarding-video"],
 

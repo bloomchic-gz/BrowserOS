@@ -16,12 +16,13 @@ use browseros_mcp::token_estimate::estimate_tool_output_tokens;
 use rmcp::model::ContentBlock;
 use sea_orm::{
     ActiveValue::{NotSet, Set},
-    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, FromQueryResult, QueryFilter, QueryOrder,
-    QuerySelect, Statement, TransactionTrait,
-    sea_query::{Condition, Expr, ExprTrait, Func, OnConflict},
+    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, FromQueryResult, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, Statement, TransactionTrait,
+    sea_query::{Condition, Expr, ExprTrait, Func, OnConflict, Query, SelectStatement},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 use url::Url;
 
 pub use crate::db::entities::tool_dispatches::Model as ToolDispatchRow;
@@ -236,14 +237,31 @@ pub struct ListTasksResult {
     pub next_cursor: Option<i64>,
 }
 
+/// How many times a session id was opened and closed. A session can still gain rows while any
+/// start lacks its end: teardown writes the end only after the session's in-flight calls have
+/// drained and been recorded, and a reused id (legacy transport) opens a second life after the
+/// first one ended.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionLifecycle {
+    pub starts: u64,
+    pub ends: u64,
+    /// When the latest end was recorded.
+    pub last_end_at: Option<i64>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ListTasksQuery {
     pub agent_id: Option<String>,
     pub slug: Option<String>,
+    /// Exact `clientInfo.name` a session's start recorded. Unlike `slug`, which follows a
+    /// declared `agentName` when there is one, this is what the client reported itself as.
+    pub client_name: Option<String>,
     pub status: Option<TaskStatus>,
     pub site: Option<String>,
     pub search: Option<String>,
     pub since: Option<i64>,
+    /// Inclusive upper bound on `started_at`, the mirror of `since`.
+    pub until: Option<i64>,
     pub cursor: Option<i64>,
     pub limit: Option<i64>,
 }
@@ -461,12 +479,12 @@ impl AuditLog {
         // row. An existence check would see the first end and skip the second start, so the
         // reused session would stay `live` forever, which is the exact state being repaired.
         //
-        // The end is stamped at `created_at + duration_ms`, not `created_at`. A dispatch row
-        // records when its tool *started*, so a session killed part way through a ninety
-        // second `run` would otherwise have its end backdated to before that run began.
-        // Local-tool rows stamp write time instead, where adding the duration overshoots by
-        // a few milliseconds; an upper bound on the last evidence of life is the right
-        // direction to err.
+        // The end is stamped at `created_at + duration_ms`, not `created_at`. A top-level
+        // dispatch row records when its tool *started*, so a session killed part way through
+        // a ninety second `run` would otherwise have its end backdated to before that run
+        // began. Steps inside a script stamp write time instead, where adding the duration
+        // overshoots by a few milliseconds; an upper bound on the last evidence of life is
+        // the right direction to err.
         let statement = Statement::from_sql_and_values(
             DbBackend::Sqlite,
             r"
@@ -582,17 +600,26 @@ impl AuditLog {
                         Expr::col(tasks::Column::Site).into(),
                         Expr::value(""),
                     ]))
-                    .like(pattern),
+                    .like(pattern.clone()),
                 );
             if !summary_matches.is_empty() {
                 any = any.add(tasks::Column::SessionId.is_in(summary_matches));
             }
-            any
+            // The label above prefers `clientInfo.title`, so the reported name is matched
+            // through the session's start rows.
+            any.add(tasks::Column::SessionId.in_subquery(sessions_started_by(
+                Func::lower(Expr::col(agent_session_starts::Column::ClientName)).like(pattern),
+            )))
         });
         let condition = Condition::all()
             .add(tasks::Column::DispatchCount.gt(0))
             .add_option(query.agent_id.map(|value| tasks::Column::AgentId.eq(value)))
             .add_option(query.slug.map(|value| tasks::Column::Slug.eq(value)))
+            .add_option(query.client_name.map(|value| {
+                tasks::Column::SessionId.in_subquery(sessions_started_by(
+                    agent_session_starts::Column::ClientName.eq(value),
+                ))
+            }))
             .add_option(
                 query
                     .status
@@ -600,6 +627,7 @@ impl AuditLog {
             )
             .add_option(query.site.map(|value| tasks::Column::Site.eq(value)))
             .add_option(query.since.map(|value| tasks::Column::StartedAt.gte(value)))
+            .add_option(query.until.map(|value| tasks::Column::StartedAt.lte(value)))
             .add_option(search_condition)
             .add_option(query.cursor.map(|value| tasks::Column::CursorId.lt(value)));
         let mut tasks = Tasks::find()
@@ -619,6 +647,48 @@ impl AuditLog {
             None
         };
         Ok(ListTasksResult { tasks, next_cursor })
+    }
+
+    pub async fn session_lifecycle(&self, session_id: &str) -> AppResult<SessionLifecycle> {
+        let conn = self.db.connection();
+        let starts = AgentSessionStarts::find()
+            .filter(agent_session_starts::Column::SessionId.eq(session_id))
+            .count(conn)
+            .await?;
+        let ends = AgentSessionEnds::find()
+            .filter(agent_session_ends::Column::SessionId.eq(session_id))
+            .count(conn)
+            .await?;
+        let last_end_at = AgentSessionEnds::find()
+            .filter(agent_session_ends::Column::SessionId.eq(session_id))
+            .order_by_desc(agent_session_ends::Column::CreatedAt)
+            .one(conn)
+            .await?
+            .map(|end| end.created_at);
+        Ok(SessionLifecycle {
+            starts,
+            ends,
+            last_end_at,
+        })
+    }
+
+    /// The `clientInfo.name` each session's first start recorded, keyed by session id.
+    /// Dispatch rows carry a display label instead, which prefers `clientInfo.title`; sessions
+    /// with no start row are missing from the map.
+    pub async fn client_names(&self, session_ids: &[String]) -> AppResult<HashMap<String, String>> {
+        let mut names = HashMap::with_capacity(session_ids.len());
+        if session_ids.is_empty() {
+            return Ok(names);
+        }
+        let starts = AgentSessionStarts::find()
+            .filter(agent_session_starts::Column::SessionId.is_in(session_ids.iter().cloned()))
+            .order_by_asc(agent_session_starts::Column::Id)
+            .all(self.db.connection())
+            .await?;
+        for start in starts {
+            names.entry(start.session_id).or_insert(start.client_name);
+        }
+        Ok(names)
     }
 
     /// Returns the audit summary for one session without loading its dispatch history.
@@ -881,6 +951,16 @@ async fn query_dispatches_for_session<C: ConnectionTrait>(
         .await?)
 }
 
+/// `SELECT session_id FROM agent_session_starts WHERE <condition>`, for filtering tasks by
+/// what their start rows recorded.
+fn sessions_started_by(condition: impl sea_orm::sea_query::IntoCondition) -> SelectStatement {
+    Query::select()
+        .column(agent_session_starts::Column::SessionId)
+        .from(AgentSessionStarts)
+        .cond_where(condition)
+        .to_owned()
+}
+
 async fn query_start<C: ConnectionTrait>(
     conn: &C,
     session_id: &str,
@@ -981,22 +1061,79 @@ pub fn bounded_args_json(value: &serde_json::Value) -> String {
 /// dropped on purpose so the ledger leaks neither the value nor its size.
 const REDACTED_MARKER: &str = "[redacted]";
 
-/// Like `bounded_args_json`, but first strips secret values the tool flagged. For a
-/// sensitive `fill`, only the values of the flagged refs are replaced (sibling
-/// fields such as a username stay readable); `redact_all_values` replaces every
-/// `value`/`text`/`fields[].value`, used when the target carried no ref to key on.
+/// Scrubs explicit password fields even without runtime hints, before bounding.
+/// Hints additionally redact selected field values or all values/script source.
+/// Typed credential metadata remains readable; raw CDP strings use the separate
+/// context-aware script boundary below, including when their JSON is malformed.
 pub fn redacted_args_json(
     value: &serde_json::Value,
     hints: Option<&browseros_mcp::AuditHints>,
 ) -> String {
-    match hints {
-        Some(hints) if hints.redact_all_values || !hints.sensitive_refs.is_empty() => {
-            let mut redacted = value.clone();
-            redact_args(&mut redacted, hints);
-            bounded_args_json(&redacted)
-        }
-        _ => bounded_args_json(value),
+    // Explicit password fields are sensitive even when admission/cancellation
+    // prevented the handler from supplying runtime hints. Scrub before bounding,
+    // since truncation can otherwise persist a prefix of the secret.
+    let mut redacted = value.clone();
+    redact_password_fields(&mut redacted);
+    if let Some(hints) = hints {
+        redact_args(&mut redacted, hints);
     }
+    bounded_args_json(&redacted)
+}
+
+/// Script CDP parameters can be malformed, so parsing cannot authorize keeping
+/// their bytes. Credential params are omitted wholesale at this string boundary;
+/// typed tool options still retain metadata and scrub explicit password fields.
+pub fn redacted_script_args(method: &str, args: &serde_json::Value) -> String {
+    let mut sanitized = args.clone();
+    if let Some(values) = sanitized.as_array_mut()
+        && browseros_mcp::tools::credentials::is_credential_primitive(method, values)
+    {
+        let parameter = match method {
+            "cdp" => Some(1),
+            "cdpJsonForPage" => Some(2),
+            _ => None,
+        };
+        if let Some(parameter) = parameter.and_then(|index| values.get_mut(index)) {
+            *parameter = json!(REDACTED_MARKER);
+        }
+    }
+    redacted_args_json(&sanitized, None)
+}
+
+fn redact_password_fields(value: &mut serde_json::Value) -> bool {
+    let mut changed = false;
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, value) in object {
+                if key == "password" {
+                    *value = json!(REDACTED_MARKER);
+                    changed = true;
+                } else {
+                    changed |= redact_password_fields(value);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                changed |= redact_password_fields(value);
+            }
+        }
+        serde_json::Value::String(text) => {
+            // Raw CDP paramsJson crosses as a serialized object in an argument
+            // array. Preserve other strings byte-for-byte, including JSON whose
+            // formatting the script might rely on. Parent source uses its hint.
+            if let Ok(mut nested) = serde_json::from_str::<serde_json::Value>(text)
+                && (nested.is_object() || nested.is_array())
+                && redact_password_fields(&mut nested)
+                && let Ok(scrubbed) = serde_json::to_string(&nested)
+            {
+                *text = scrubbed;
+                changed = true;
+            }
+        }
+        _ => {}
+    }
+    changed
 }
 
 fn redact_args(value: &mut serde_json::Value, hints: &browseros_mcp::AuditHints) {
@@ -1009,7 +1146,7 @@ fn redact_args(value: &mut serde_json::Value, hints: &browseros_mcp::AuditHints)
             .and_then(serde_json::Value::as_str)
             .is_some_and(|ref_id| hints.sensitive_refs.iter().any(|r| r == ref_id));
     if redact_top {
-        for key in ["value", "text"] {
+        for key in ["value", "text", "code"] {
             if object.contains_key(key) {
                 object.insert(key.to_string(), json!(REDACTED_MARKER));
             }
@@ -1124,6 +1261,32 @@ mod tests {
     fn parse(json_text: &str) -> serde_json::Value {
         serde_json::from_str(json_text)
             .unwrap_or_else(|err| panic!("args_json is valid JSON: {err}"))
+    }
+
+    #[test]
+    fn malformed_credential_cdp_parameters_are_redacted_before_parsing() {
+        let args = json!([
+            1,
+            "Autofill.fillCredential",
+            "{\"password\":\"synthetic-malformed-secret\",}"
+        ]);
+        let out = super::redacted_script_args("cdpJsonForPage", &args);
+        assert!(!out.contains("synthetic-malformed-secret"));
+        assert!(out.contains("Autofill.fillCredential"));
+        assert!(out.contains("[redacted]"));
+    }
+
+    #[test]
+    fn redacts_passwords_in_script_arrays_and_serialized_cdp_parameters() {
+        let args = json!([
+            1,
+            "Autofill.fillCredential",
+            json!({"username":"synthetic-user", "password":"synthetic-cdp-secret"}).to_string()
+        ]);
+        let output = redacted_args_json(&args, None);
+        assert!(!output.contains("synthetic-cdp-secret"));
+        assert!(output.contains("synthetic-user"));
+        assert!(output.contains("[redacted]"));
     }
 
     #[test]

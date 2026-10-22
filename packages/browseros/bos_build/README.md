@@ -34,6 +34,7 @@ live.
 | Release an extension CRX to alpha | `gh workflow run release-extensions.yml` |
 | Preview or promote extension feeds | `gh workflow run release-extension-feeds.yml` |
 | Repair a tracked browser/server appcast | `gh workflow run repair-update-feed.yml` |
+| Publish the Neo Docker image | `gh workflow run release-docker.yml -f version=<version>` |
 | Grab today's signed mac build | Download the `nightly-browseros` / `nightly-browserclaw` prerelease |
 | Check the patch stack | `browseros dev doctor` |
 
@@ -145,9 +146,9 @@ ephemeral runners — live in [`docs/build-cli.md`](docs/build-cli.md).
 
 ## Release a browser
 
-Full releases are dispatch-only. By default they build Linux x64, signed
-Windows x64, and signed macOS arm64, x64, and universal. Dispatch from the
-default branch:
+Full releases are dispatch-only. By default Neo builds Linux x64 and arm64;
+BrowserOS builds Linux x64. Both build signed Windows x64 and signed macOS
+arm64, x64, and universal. Dispatch from the default branch:
 
 ```bash
 gh workflow run release-browseros.yml --ref main
@@ -155,9 +156,12 @@ gh workflow run release-browserclaw.yml --ref main
 ```
 
 BrowserOS has no platform, component, extension-channel, or signing inputs.
-BrowserOS neo accepts `platforms`, `macos_arch`, and `publication`, whose
+BrowserOS neo accepts `platforms`, `macos_arch`, `linux_arch`, and `publication`, whose
 defaults are the full release; `publication=draft-only` keeps both components
 private for test builds (see [`docs/release-ci.md`](docs/release-ci.md#dispatch)).
+Neo defaults to `linux_arch=all`; select `linux_arch=x64` or `arm64` to narrow
+the published-resource Linux build. Standalone/reusable Linux workflows retain
+their x64 default. See [the Linux arm64 design and build instructions](docs/linux-arm64.md).
 The workflow freezes the dispatch SHA, publishes the product server and
 extension to alpha in strict order, and passes their exact output versions into
 every native browser lane. The committed onboarding version is pinned too, so queued
@@ -367,6 +371,7 @@ non-interactive Python surface the build steps depend on.
 | [`docs/warpbuild-ci.md`](docs/warpbuild-ci.md) | A Linux or Windows cloud build is slow, stuck, or expensive |
 | [`docs/nightly-macos-ci.md`](docs/nightly-macos-ci.md) | You are debugging a signed nightly or setting up the Mac builder |
 | [`docs/windows-install-verification.md`](docs/windows-install-verification.md) | You are hand-verifying a Windows installer before shipping |
+| [`docs/docker-image.md`](docs/docker-image.md) | You are building, testing, or publishing the Neo Docker image |
 
 Team-only context lives in the `.internal-docs/` submodule (private; nothing
 there is needed to build BrowserOS):

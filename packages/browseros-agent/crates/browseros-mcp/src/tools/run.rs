@@ -35,7 +35,9 @@ const MAX_RETURN_VALUE_BYTES: usize = 2_000_000;
 
 const DESCRIPTION: &str = r#"The primary way to drive the browser - prefer run for any task; the granular tools are the fallback. Do multi-step flows, pagination, bulk extraction, and repeated act/read loops - in ONE call: async JavaScript against the `browser` SDK in the server runtime. console.log is captured; return a value to read it back; exceptions come back as a result, not thrown. Every call is `await`-able. Each run is bounded to 30000 ms of wall time and cannot exceed it (larger `timeout` values are clamped): keep a single call under 30s. For longer or open-ended page-driven loops, do one bounded chunk per call, or start the work on the page and poll its result with short follow-up calls.
 
-Runtime: a bare engine, not Node and not a page. You get `browser`, `console`, `sleep(ms)`, `setTimeout`/`clearTimeout`, and nothing else. There is no fetch, require, process, window, document or localStorage. To touch the DOM or call a site's API, go through page.evaluate, which runs inside the page.
+Runtime: a bare engine, not Node and not a page. You get `browser`, `console`, `setTimeout`/`clearTimeout`, and nothing else. (`sleep(ms)` exists for a deliberate pause and is almost never the right tool: opening, navigating and page-changing evaluates all return settled, so pausing after them only adds the time you picked.) There is no fetch, require, process, window, document or localStorage. To touch the DOM or call a site's API, go through page.evaluate, which runs inside the page.
+
+Readiness is handled for you, so do not pause to let a page catch up. `browser.open`, `page.goto`/`back`/`forward`/`reload` return once the page has stopped changing, not merely once it has loaded. `page.evaluate` detects a script that changed the page and settles before returning, reporting `changed`. If you find yourself writing `await sleep(...)` after any of these, the wait has already happened. `page.click`/`fill`/`hover`/`selectOption` go straight to the input bridge and return once the input is delivered, so after one of those, wait on the thing you expect with `page.waitForSelector`/`waitForText`, never a fixed pause.
 
 One rule: anything that needs a page hangs off a page handle, anything that does not hangs off `browser`. Get a handle with `browser.open(url)`, or `browser.page(id)` for an id you already have. Page actions address a snapshot ref like "e12", never a CSS selector.
 
@@ -60,8 +62,8 @@ Page handle (refs eN come from a snapshot's text/refs):
   page.type(text) / press(key) / insertText(text)   - these act on whatever has focus, so they take no ref
   page.scroll(dir,amount,ref?) / clickAt(x,y) / typeAt(x,y,text) / hoverAt(x,y) / dragAt(x1,y1,x2,y2)
   page.dialogAccept() / dialogDismiss() - accept or dismiss an open JavaScript dialog (confirm/prompt/beforeunload). An action that opens one gets back { dialogOpen: true, kind, message } instead of its usual result, and the page stays blocked until you accept or dismiss, so do that before anything else on the page.
-  page.waitForSelector(sel) / waitForText(text) / waitForTime(ms) - resolve when ready. For content that loads in, wait on the thing itself with waitForSelector (or waitForText); it resolves the moment it appears, polling up to 10s by default (pass { timeout } to change it, max 30s) and returning { matched }. On timeout matched is false and it does NOT throw, so check matched instead of assuming the wait succeeded. Use waitForTime only for a plain fixed pause; `await sleep(ms)` also works. Never poll in a loop (re-checking a count with a fixed wait between tries) - wait on the selector once instead.
-  page.evaluate(fn, arg?)            - runs INSIDE the page. Pass a real function; a second argument is JSON-serialized and handed to it, e.g. page.evaluate((sel) => document.querySelectorAll(sel).length, '.row'). It does not close over script variables. A code string with a `return` also works: page.evaluate("return document.title").
+  page.waitForSelector(sel) / waitForText(text) / waitForTime(ms) - resolve when ready. For content that loads in, wait on the thing itself with waitForSelector (or waitForText); it resolves the moment it appears, polling up to 10s by default (pass { timeout } to change it, max 30s) and returning { matched }. On timeout matched is false and it does NOT throw, so check matched instead of assuming the wait succeeded. waitForTime is a plain fixed pause and a last resort: wait on the thing itself instead. Never poll in a loop (re-checking a count with a fixed wait between tries) - wait on the selector once instead.
+  page.evaluate(fn, arg?, opts?)     - runs INSIDE the page. Returns { changed } alongside the value: a script that mutated the page is settled before you get it back, so never pause afterwards. For an effect that is entirely asynchronous (a click whose result arrives over the network) pass { settle: true } to wait for quiet regardless. Pass a real function; a second argument is JSON-serialized and handed to it, e.g. page.evaluate((sel) => document.querySelectorAll(sel).length, '.row'). It does not close over script variables. A code string with a `return` also works: page.evaluate("return document.title").
   page.screenshot(opts?) / pdf(opts?)
     screenshot has no default cap; size caps CSS pixels, with omitted axes unconstrained
   page.download(ref) / upload(ref, files)
@@ -85,7 +87,7 @@ const BOOTSTRAP_JS: &str = r#"
   const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor;
 
   // Timers: the runtime is a bare engine, so bridge setTimeout/sleep to a real
-  // async sleep. For content that loads in, prefer browser.wait({ for: 'selector' }).
+  // async sleep. For content that loads in, prefer page.waitForSelector(sel).
   globalThis.sleep = (ms) => __browserosSleep(Number(ms) || 0);
   globalThis.setTimeout = (fn, ms) => {
     __browserosSleep(Number(ms) || 0).then(() => { if (typeof fn === 'function') fn(); });
@@ -308,6 +310,9 @@ const BOOTSTRAP_JS: &str = r#"
       waitForTime: (ms) => tool('wait', { value: ms }),
       wait: (opts) => tool('wait', opts),
 
+      ...(__browserosFeatures.credentials
+        ? { credentials: (opts) => tool('credentials', opts) }
+        : {}),
       screenshot: (opts) => tool('screenshot', opts),
       pdf: (opts) => tool('pdf', opts),
       // A real function is serialized here, before the JSON boundary drops it.
@@ -339,6 +344,9 @@ const BOOTSTRAP_JS: &str = r#"
     page: (pageId) => pageHandle(pageId),
     open: async (url, opts) => pageHandle(await call('pages.newPage', [url, opts])),
     history: (opts) => call('tool:history', [opts]),
+    ...(__browserosFeatures.credentials
+      ? { credentials: (opts) => call('tool:credentials', [opts]) }
+      : {}),
     // Discovery only: Rust refuses tool:browser_profiles/browser_target on older natives
     // whether or not a script finds a way to call them.
     ...(__browserosFeatures.profileTargeting
@@ -837,6 +845,12 @@ impl BrowserBridge {
     ) -> Result<BrowserCallValue, String> {
         let args = parse_bridge_args(args_json)?;
         let page = target_page(method, &args);
+        // Mark before host authorization/native gating: even a rejected call may
+        // have a password literal in its parent script or serialized CDP input.
+        let credential_input = crate::tools::credentials::is_credential_primitive(method, &args);
+        if credential_input && let Some(hook) = &self.ctx.inner_call_hook {
+            hook.mark_credential_input();
+        }
         // Kept for the audit record and the self-healing distiller; dispatch
         // consumes the owned args below.
         let recorded_args = Value::Array(args.clone());
@@ -1287,6 +1301,7 @@ fn tool_def(name: &str) -> Option<ToolDef> {
         // variants and the dialog pair, so the SDK reaches every act kind.
         "act" => tools::act::definition(),
         "history" => tools::history::definition(),
+        "credentials" => tools::credentials::definition(),
         "browser_profiles" => tools::browser_profiles::definition(),
         "browser_target" => tools::browser_target::definition(),
         _ => return None,
@@ -1353,6 +1368,13 @@ fn parse_bridge_args(args_json: &str) -> Result<Vec<Value>, String> {
 /// variants) carry the page id as their first argument; the rest address no
 /// specific page.
 fn target_page(method: &str, args: &[Value]) -> Option<u32> {
+    if method == "tool:credentials" && args.first().is_some_and(Value::is_object) {
+        return args
+            .first()?
+            .get("page")?
+            .as_u64()
+            .and_then(|page| u32::try_from(page).ok());
+    }
     let page_first = method.starts_with("observe.")
         || method.starts_with("input.")
         || method.starts_with("nav.")

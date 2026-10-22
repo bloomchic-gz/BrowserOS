@@ -455,3 +455,92 @@ native 分别回归。用独立 profile、数据库、容器和网络，原始�
 
 远端集成分支新增的飞书登录提交 `66e70d48a` 会原样保留，与当前候选在独立工作树合并；
 正在执行真实矩阵的源码保持不变。后续部署必须验证包含这项并行改动的最终合并版本。
+
+## 上游同步候选（2026-10-22，待完成资格验证）
+
+本轮在独立工作树从集成提交 `313d73385e3f3d406a4cad5c68a19fdc049ee1ac`
+准备合入上游 `1f265d99797c0f5bcc9a80366d0fd12ee533dc90`（上海时间
+2026-10-22 19:17）。共同基线为 `ca125dcc2`，上游新增 22 个提交、175 个路径。
+自动合并没有文本冲突；合并前的 53 个自有差异路径与上游修改无交集，合并树中内容全部
+保留。本节随后追加维护说明，没有调整产品代码。此处只记录候选准备，不代表已提交、
+推送、部署或真实验收通过；日常服务与正在验收的 Machine native 源码保持独立。
+
+### 本轮接入边界
+
+- 上游的就绪等待、`evaluate` 的 `changed` / `settled`、snapshot link URL 和原生
+  credentials 工具位于 Rust `crates/browseros-core` / `browseros-mcp`。当前 Paperclip
+  `/mcp` 仍使用 TypeScript `packages/browser-core` / `browser-mcp`，这些实现没有被本轮
+  上游修改。工具结果未知时禁止重放；就绪信号不能代替动作回执或停止证明。
+- 新 `BROWSERCLAW_MODE=hosted` 和 `/v1` 只属于 Neo/Claw。既有部署保持原模式；不要把
+  Neo session / `taskName` 当成 Paperclip Task 或更换现有绑定。Paperclip OAuth、常驻
+  连接、团队增量消息、模型/effort、CLI/ACP、Stop 的自有接入路径保持原样。
+- Chromium 的 browser sign-in 默认关闭针对浏览器账号登录，不等于关闭网页内的
+  Paperclip device OAuth。新 credentials capability 要求 BrowserOS `0.51.2.1` 起的
+  原生能力；已有 `0.51.0` 浏览器不能据此宣布支持。不要伪造版本、扩大工具权限或在升级
+  验收中操作真实保存密码。合入 Chromium patch 不等于已构建或部署新浏览器内核。
+- Claw 的 m0019 / m0020 改用 SQLite column existence 检查，修复 doctor 裁剪迁移记录后
+  重复 `ADD COLUMN` 的启动失败。没有新增 Paperclip 迁移，也没有改动当前 TypeScript
+  conversation / binding schema。原数据、profile、sidecar 和 OAuth 凭据仍须备份核对。
+
+### 数据副本和验证入口
+
+上游 `apps/claw-server/src/db/mod.rs` 的
+`repeated_doctor_ledger_pruning_keeps_startup_recoverable` 使用独立临时数据库，连续两次
+删除 m0017–m0020 的 ledger 行后重新打开，检查 20 个迁移记录恢复、已有 feedback / error
+budget 数据保留且没有落入 `.bak` 重建。可先执行：
+
+```sh
+cargo test --locked -p claw-server --lib db::tests::repeated_doctor_ledger_pruning_keeps_startup_recoverable -- --exact
+```
+
+该测试尚未在本候选执行，也不等于存量用户库升级。若部署 Claw，另从一致备份制作数据库
+副本，在副本重现 ledger 缺行并由候选 `Database::open` 升级，比较原表行与 schema、再
+正常 reopen；必须显式指定独立 `BROWSERCLAW_DIR`，不得对共享数据运行 doctor 或清空
+迁移记录。当前 Bun 服务的数据保留验证仍沿前面的本机部署流程进行。
+
+完成当前真实矩阵后，在本候选独立工作树安装冻结依赖并执行本文件“应用工作区构建与类型
+检查”及 contributor 要求的 `bun run check`、`bun run test`，另跑
+`cargo test --workspace --locked`、`bun run codegen:hosted-api:check`。仅用本地 `--ci` /
+`--no-upload` 构建入口，不触发 release 上传。最终合并 SHA 还需真实 Codex/Claude 的
+CLI/ACP、本地/远程 native 通路复核，同 Task、模型/effort、团队同步、OAuth refresh、
+Pause、Stop、显式恢复与未知动作不重放分别保留证据；旧矩阵不自动覆盖新合并版本。
+
+当前仅通过轻量检查：`cargo fmt --all --check`、非 Chromium patch 路径的
+`git diff --cached --check`、17 个 Python 文件 AST、6 个 JSON 和 3 个 shell 文件语法。
+原始全路径 diff check 对上游 Chromium 内嵌 patch 的上下文空行报告 whitespace；这些
+patch 与锁定上游逐字一致，不能为清空告警破坏补丁格式。初次通用 JSON 检查也把一个
+以 `.json` 命名的 Chromium patch 误当 JSON，排除这类 patch 文本后通过，未修改源文件。
+hosted API breaking 检查因共同基线尚无该 API spec 返回“nothing to compare”，只说明
+首次引入无旧规范可比较，不能算 API 行为测试。
+
+### Actions 与发布限制
+
+上游新增 `.github/workflows/release-docker.yml`，仅含 `workflow_dispatch`；另修改了四个
+既有工作流。保留上游文件，不能启用或手动运行发布任务。推送前后查询 fork 工作流状态，
+包括新增 workflow；若 API 已发现它且为 active，应按既有关闭要求禁用，并记录实际返回
+状态。若集成分支的新增 workflow 尚未被 GitHub 注册，记录未注册，不能声称已禁用。
+仓库级 Actions 权限接口仍可能返回 403，不能据此声称总开关关闭。只推送集成分支，默认
+`main` 及原有远端历史保持不变。
+
+
+## 最新资格阻塞：故障后当前请求丢失（2026-10-22）
+
+此项更新优先于前面的“最后一条仍在运行”检查点。旧候选 `bcf8ba930` 的
+`claude-native-release-7` 完成真实 BrowserOS 八阶段、普通 Task、同 Task、Stop 和
+worker 强杀后，在 provider 强杀场景失败。强杀命中准确 Claude 进程，物理清理和
+租约/停止回执已通过；但显式新消息要求 `after-provider`，新 Run 却执行已完成的
+`initial` 动作，使其计数从 1 变成 2。清理通过，原失败报告和 provider 输入完整保留。
+这不是一次通过，也不是仅编译或测试工具问题。之前七条完整路径仅作为旧源码的基线。
+
+服务端保存了正确的当前 comment，但渲染时按完整历史去重，当前消息只剩在历史 JSON
+中，“Latest wake comment”正文为空；旧 Task 标题又含初始命令。修复必须使用当前 Run
+服务端绑定的 `paperclipWake.commentIds` / comments 呈现当前请求，不能把包含中断来源的
+`executionContinuation.originCommentIds` 当作新的操作授权。历史、未知动作和恢复记录
+继续保留，不能通过删记录或重置 Task 来通过验收。
+
+后续资格绑定修复后的上游合并源码及新产物。故障夹具新增全量动作计数核对：新动作成功
+也不能掩盖任何旧动作重放（Docker criteria 6、本机 criteria 3）。独立 Runner 安装包
+更新为 `2026.1022.0-machine.12`，能力协议仍是 v1；必须重建其真实依赖闭包，不能只因为
+Machine 源文件未改就复用包含旧 adapter-utils 的 bundle。Linux x86_64 正在编译和实际
+容器验证，ARM64 保留；ARM64 宿主上的 x86_64 容器属于仿真，不等于物理 x86 宿主验收。
+当前尚未完成新矩阵、提交发布或本机切换；新准入不得以这些待验结果开放。
