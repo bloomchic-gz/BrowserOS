@@ -384,3 +384,74 @@ Claude native Machine 也尚未实现或验收，仍需受构建清单授权的 
 升级时继续使用现有准入规则，不能只把 `paperclip_runner` 加入 Machine 支持列表。
 复用代码、实际结果与下一步所需的持久所有权和停止证明，见
 [Machine native 实验记录](https://github.com/bloomchic-gz/paperclip/blob/codex/browseros-machine-integration-20261018/tests/browseros-machine-acceptance/machine-native-spike-validation-2026-10-22.md)。
+
+
+## Machine native 正式接入维护（2026-10-22）
+
+新的控制端路径复用现有 BrowserOS 连接、对话和工具协议；BrowserOS 不负责在远端启动
+provider，也不新增一个会话或 Task 来绕过恢复。实际发布状态、逐项结果、首次失败与限制见
+[Paperclip 正式接入验收记录](https://github.com/bloomchic-gz/paperclip/blob/codex/browseros-machine-integration-20261018/tests/browseros-machine-acceptance/machine-native-production-validation-2026-10-22.md)。
+最终矩阵未完成时继续保持部署门禁；旧实验与旧矩阵不累计为新版通过。
+
+Paperclip 端为 native Codex 或 Claude Agent 显式绑定已升级的 Linux ARM64 glibc Machine，
+使用 `preconfigured` home、`per_turn` 生命周期；Runner 独立包为 `2026.1022.0-machine.11`。
+执行端保留自己的认证和 cwd，控制端提供匹配的 release daemon/provider pack 与认证 WSS。
+原有 CLI/ACP 配置、连接、模型/思考强度与普通 Task 不自动转换。Claude Code 仍自动确定
+Claude，Codex 不重复显示 ACP agent；通用 ACP 仍保留原选择。
+
+故障恢复必须检查同一 Task、真实工具结果、回执与租约以及物理进程结束。独立 supervisor
+在 worker 强杀后清理已观察进程并补写 outbox；新连接与 PID 消失不能代替精确停止回执。
+BrowserOS 绑定 Task 的 Stop 或未完成检查点不会交给新 Run，新消息通过正常准入后保留
+Task、重建完整上下文；普通 Task 原有受控 checkpoint 恢复保留。
+浏览器未知动作保持 pending，不因重连、续聊或新版工具指纹自动重放。整个容器被强杀且
+回执缺失时继续阻止执行；这属于安全保持，不写成自动恢复成功。
+
+复用 [Docker native 构建与完整矩阵](https://github.com/bloomchic-gz/paperclip/blob/codex/browseros-machine-integration-20261018/tests/browseros-machine-acceptance/faults/README.md#docker-中的正式-machine-native-验收)，
+Codex/Claude 各测首轮、同 Task、Stop、worker/provider 强杀及全部基础故障；CLI/ACP 和本地
+native 分别回归。用独立 profile、数据库、容器和网络，原始凭据/日志只留在私有证据目录。
+维护时不强杀日常浏览器、共享数据库或无关 Runner；上线后还要实际调用生产 BrowserOS 工具。
+
+控制端重启后的恢复不只检查一次：Machine 迟到的停止 outbox 到达后，周期恢复须完成
+精确回执校验、审计取消和租约结算。缺失回执继续等待，禁止通过清状态或自动重发动作解锁。
+
+远端 native 的 shell 使用执行宿主自己的 HOME/PATH。Paperclip 必须从已绑定的 Machine
+通道读取并显式传入 native turn；runnerd 自身继承 PATH 不等于 Codex 工具也获得 PATH。
+曾在实际 BrowserOS Stop 验收中发现 `sleep` 不可用，故升级验收要检查真实前台命令已开始，
+再检查 Stop、精确回执和租约结算，不能以只读浏览器工具成功代替。
+
+若本地 native Stop 已取消、进程已退出，下一条消息却返回
+`native_session_cleanup_quarantined`，先核对原 Run 是否留下未知浏览器动作的恢复记录。
+已确认 Stop 的结算也必须保留这项独立清理义务；新消息通过原有停止证明核验后才能继续。
+不要清除旧动作、重置 Task 或手动删除 SDK ownership 文件。该回归与修复的真实复验状态
+同样以正式验收记录为准，不能仅凭 cancelled 状态或类型检查宣布恢复成功。
+
+未知动作的禁止重放标记必须在首次恢复记录中原子保存。Task 状态变化关闭恢复记录后，
+缺少准确停止证明的新消息仍不得创建 Run/provider；仅保存消息并等待核验。容器丢失
+验收要同时检查这项准入阻塞和旧动作不重放，不能以连接恢复或旧 Run failed 代替。
+
+
+本轮 Machine native 的候选准入进一步限定为 `gpt-6.1-sol` 或 `claude-sonnet-5`，均显式
+选择 `low`。环境检查以及新建/恢复执行时都检查实际模型与 effort，包括 Task override；
+未通过组合保持关闭，不静默降级或换模型。当前网关下 Sonnet 4.6 的普通 Task 曾在接受
+完成报告后回复“空消息”，几个提示词候选已撤回；Sonnet 5 的响应诊断和三个普通 Task
+虽已通过，完整真实资格仍须看正式验收记录。原有本地 native、CLI/ACP 模型配置保留。
+
+原生协调工具在控制端执行，其内部 API 请求应使用实际 `PAPERCLIP_LISTEN_HOST` /
+`PAPERCLIP_LISTEN_PORT`，通配绑定映射到同地址族 loopback。不要把仅容器可解析的
+`host.docker.internal` 当成控制端可访问地址；也不要因此改掉远端 CLI/ACP 的已公布 API
+地址。真实普通 Task 补验必须由模型通过 Paperclip 工具写入一条唯一评论并核对持久结果，
+以覆盖这条路径，不能仅以 `paperclip_finish` 成功作为协调工具正常的证据。
+
+
+## 提前代码审阅检查点（2026-10-22 21:44，UTC+8）
+
+按维护者要求，先将当前 Machine native 候选提交并推送到集成分支，供独立 code review。
+此检查点不是部署或完整验收通过声明；本机服务、现有数据及配置尚未切换。
+
+最终八条路径已有七条完整通过：Codex 的 Machine native、CLI、ACP、本地 native，
+以及 Claude 的 Machine CLI、ACP、本地 native。最后一条 Claude Machine native 仍在运行；
+其实际 BrowserOS 八阶段、普通 Task、Stop 和 worker 强杀已通过，剩余故障阶段不能提前计为通过。
+完整结果、首次失败和环境限制以正式接入验收记录为准；最终构建/类型检查及合并后的回归仍需收尾。
+
+远端集成分支新增的飞书登录提交 `66e70d48a` 会原样保留，与当前候选在独立工作树合并；
+正在执行真实矩阵的源码保持不变。后续部署必须验证包含这项并行改动的最终合并版本。
