@@ -575,3 +575,64 @@ Dot Runner、Machine Stop 回调、启动测试 mock 和 Python 测试环境问�
 OAuth、CLI/ACP 和 provider 配置未切换。后续只有最终候选通过真实资格后，才按既有备份和
 部署流程更新本机。上游新增手动 release-docker workflow 若尚未注册，应记录未注册，不能
 将其列为已禁用；已有工作流继续保持关闭。
+
+## 上游同步、精简验收与平台准入（2026-10-23）
+
+本轮采用按风险去重的验收计划：254 项减为 172 项，省略 82 项重复的 x86_64 控制端/数据库/消息故障检查，保留原始计划和逐项省略清单。可交付范围为 **12 条完整通过的通道、144 个场景及 12 次启动检查（156 项）**。请求的整个矩阵仍未完成：**x86_64 Machine native 准入保持关闭**，不能把编译、沙箱探针或单个 provider 的通过表述成 Codex/Claude 完整故障验收通过。
+
+用户进一步要求简化后，native x64 的 16 项随平台暂缓：Claude 已有真实启动失败及完整性校验耗时证据；Codex native 未启动，不标记为失败或通过。其余已通过的完整通道复用原始记录，不重复执行；原始失败与暂缓前的计划快照均保留。
+
+本轮运行时源码为 Paperclip `01baad7e1cbb8545c690ac08674bac55c823cb6c`；standalone 打包修复为 `e5f49ce465abdf705dae09175d9422f0ae3b26c5`；准入收紧及对应回归为 `b8571fe7fa303d57c6bbd18ca5ece77ec3052a0e`。BrowserOS 源码为 `ddea24caa9c29529c5cadeb6c2639a8c6f73f23b`。包含上游 Paperclip `043f2514e67c50320433a0013fb228a75a51325c`、BrowserOS `1f265d99797c0f5bcc9a80366d0fd12ee533dc90`。文档提交及本机部署结果另行记录。
+
+| Provider | 执行环境 | 引擎 | 计划场景数 | 实际结果 |
+|---|---|---|---:|---|
+| claude | Linux ARM64 Machine | native | 20 + 1 boot | 通过 |
+| codex | Linux ARM64 Machine | native | 20 + 1 boot | 通过 |
+| claude | Linux ARM64 Machine | acp | 17 + 1 boot | 通过 |
+| codex | Linux ARM64 Machine | acp | 17 + 1 boot | 通过 |
+| claude | Linux ARM64 Machine | cli | 17 + 1 boot | 通过 |
+| codex | Linux ARM64 Machine | cli | 17 + 1 boot | 通过 |
+| claude | 本地 macOS ARM64 | native | 12 + 1 boot | 通过 |
+| codex | 本地 macOS ARM64 | native | 12 + 1 boot | 通过 |
+| claude | Linux x86_64（仿真） Machine | cli | 3 + 1 boot | 通过 |
+| codex | Linux x86_64（仿真） Machine | cli | 3 + 1 boot | 通过 |
+| claude | Linux x86_64（仿真） Machine | acp | 3 + 1 boot | 通过 |
+| codex | Linux x86_64（仿真） Machine | acp | 3 + 1 boot | 通过 |
+| claude | Linux x86_64（仿真）Machine | native | 7 + 1 boot | 环境阻塞，未计通过 |
+| codex | Linux x86_64（仿真）Machine | native | 7 + 1 boot | 未启动，随平台暂缓 |
+
+6 条 ARM64 Machine 与两条本地 native 保留完整故障场景；两条 ARM64 Machine native 各包含 8 步真实 BrowserOS 旅程。x86_64 CLI/ACP 对每个 provider 保留真实浏览器与同 Task 续聊、Stop、execution-host 强杀及启动检查。被省略的场景、失败尝试、模型/浏览器模拟与未执行组合均不计作通过。逐场景 `recoveryDurationMs` 包含物理停止、租约结算、防重放观察及显式续聊，不能当作 Stop 响应延迟；旧 CLI/ACP 的部分恢复仍需数分钟。
+
+### x86_64 的边界
+
+Linux x86_64 Rust release 二进制已实际编译并校验 ELF、动态依赖和构建元数据。执行环境为 ARM64 机器上的完整 x86_64 Linux 内核仿真，不是物理 x86 主机。内层 Codex 沙箱通过真正执行与越界写入拒绝探针；验收 guest 使用记录过摘要的 Docker AppArmor profile，允许嵌套 mount/pivot_root，其余规则、enforce 模式及全局 userns 限制保留。不能声称 stock Ubuntu Docker 默认策略已经适配。
+
+Claude native 首轮在远程产物准备中达到原有 300 秒请求时限。拆分 ESM 后，短命令包的冷启动基准约从 10 秒降到 4 秒，但端到端仍未通过。独立无凭据校验确认预装 provider pack 的所有哈希正确；完整校验耗时 83.656 秒，超过产品原有 30 秒，启用仿真 CPU 的 SHA-NI 后仍为 87.753 秒。原失败、启动 spans 与两次基准都保留。OpenCode 版本诊断首次因只读 HOME 失败，改用私有可写临时 HOME 后通过；该诊断修正不改变产品配置。继续 native x64 验收需要能在原时限内完成这些校验的执行环境，不能关闭完整性检查、放宽准入或把仿真性能问题当作模型故障通过。
+
+当前开放的 Machine native 为 Linux ARM64 glibc、显式 Codex `gpt-6.1-sol` 或 Claude `claude-sonnet-5`、`low`、`preconfigured` HOME 与 `per_turn`。既有 CLI/ACP、本地 native 和用户配置保留。x64 的编译产物继续保留，待真实 Codex/Claude 资格补齐后再开放 native 准入。
+
+补跑 x64 native 时，在独立验证分支和隔离实例恢复候选准入，集成分支继续关闭。先确认完整 provider-pack 校验在产品原时限内完成，再对 Codex/Claude 各跑启动、真实浏览器/同 Task、Stop、worker、provider、native daemon、网络与容器丢失场景。所有停止证明、租约和防重放断言通过后才合入准入变更；仅更换验收宿主时不重复已冻结的 ARM64/本地矩阵。
+
+### 修复及证据复用
+
+本轮修复包括：先持久化进程 dispatch/custody 再发布输出，避免立即 Stop 丢失回执；远程启动资源在 PRP 授权之前准备，真实进程启动后再计连接时限；完成报告之后仍回答当前请求并同步 Task；Stop 后只读续聊沿用既有浏览器状态；原生工具说明明确顶层参数，严格校验仍拒绝额外 envelope。整个容器丢失且无法取得精确停止证明时保持 Task/租约并阻断继续执行，不宣称自动恢复。
+
+已完成的真实通道仅在源码摘要与产物不变时复用。最后的准入修改只收紧未完成资格的 x64 native；独立回归验证 ARM64 正向准入及 x64 在 dispatch/文件 staging 前被拒绝。整个 workspace 的构建、类型和既有失败项的定向复验已完成；准入修改另构建并检查 server，原标准流水线的失败记录保留。打包修复通过离线安装、adapter 加载及真实进程托管/强杀/停止回执检查。所有这些检查均与真实模型和浏览器验收分开报告。
+
+本地 Claude 曾在工具返回成功后停止输出并触发 240 秒 watchdog；原因未确定，不能归咎网络。其原 Task/租约快照、失败与清理记录保留。随后相同源码、模型、fixture 和时限下整条本地通道通过，只有完整通过的通道计入当前资格。
+
+准入收尾回归首轮 323 项中 322 项通过，既有 process adapter 的 SIGTERM 升级取消测试出现一次 `machine_disconnected`。源码、断言与时限未变的整文件 22 项复验全部通过，另外五个文件的 301 项通过结果直接复用。该执行路径源码未改；首次断连原因仍未确定，不因复验通过宣称已找到或修复根因。原失败和后续结果均保留。
+
+ARM64 沿用已完整实测的镜像和原 standalone，x64 CLI/ACP 使用 split 包。两者版本均为 `2026.1023.0-machine.13`，但产物摘要不同，安装时必须核对 SHA256 和镜像 ID：ARM64 原归档 `ddeea2934c25561864fcb1e3e9efa4ff213561bf77b3fc36e7c933cbf4a1df7a`；split 归档 `1751a35e508be4243a3941fc7620014e1bbc73bd6f44f5d191a4659075a00d3f`。Rust daemon/provider pack 的摘要不变，详见资格 JSON。
+
+### 下次升级与本机部署
+
+存量 PostgreSQL 必须用原生 pg_dump 备份；JavaScript 回退不能等价保存 CHECK 与 NULLS NOT DISTINCT。已验证隔离副本 367→378 条迁移、302 张原表的历史字段和行、升级后 307 张表、151 项 CHECK 与 3 项 NULLS NOT DISTINCT 保留，二次升级无操作。BrowserOS SQLite 的原库副本经新版初始化与旧版重开检查，原库保持不变。
+
+本机更新须先确认无运行中 Task，保存原生数据库备份、原服务配置和冷数据副本；保留既有 Agent/Environment、CLI/ACP、OAuth 稳定身份。BrowserOS 保持浏览器进程/profile，只切换 server/web 并精确重载目标扩展，核对 Debugger 实际加载脚本与磁盘摘要。更新后的真实 Task、同 Task、Stop、恢复及数据保留结果在部署章节单独记录，本节不代替部署验收。
+
+后续验证按改动范围选取：文档和 UI 展示修改只做相关检查；包/宿主修改做实际安装及受影响架构的启动/停止；Task、租约、Stop 与恢复逻辑修改对受影响引擎跑完整基础故障集，其他架构仅补架构相关场景。新增 provider/平台须有真实运行资格。已通过且源码/产物未变的通道不重复跑，省略项单列，不计通过。
+
+资格冻结后还观察到 Paperclip `d69631b01`（新增 19 提交、459 路径）及 BrowserOS `512f9cc15`（新增 32 提交、211 路径），未合入本轮，不能沿用本节资格；后续需处理 Paperclip 0372–0374 迁移碰撞及新 Runner/provider 变化。fork 默认分支和 Actions 状态保持原状。
+
+逐通道结果、版本与摘要见[本轮资格记录](https://github.com/bloomchic-gz/paperclip/blob/codex/browseros-machine-integration-20261018/tests/browseros-machine-acceptance/reports/upstream-qualification-20261023.json)。
