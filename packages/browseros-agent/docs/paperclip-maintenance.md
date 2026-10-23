@@ -544,3 +544,34 @@ worker 强杀后，在 provider 强杀场景失败。强杀命中准确 Claude �
 Machine 源文件未改就复用包含旧 adapter-utils 的 bundle。Linux x86_64 正在编译和实际
 容器验证，ARM64 保留；ARM64 宿主上的 x86_64 容器属于仿真，不等于物理 x86 宿主验收。
 当前尚未完成新矩阵、提交发布或本机切换；新准入不得以这些待验结果开放。
+
+## 提前代码审阅检查点（2026-10-23，未完成发布验收）
+
+按维护者“当前代码先提交并 push”的要求，推送上游合并候选和当前文档至
+`codex/browseros-machine-integration-20261018`。BrowserOS 合并提交为 `afa4a9099`，
+锁定上游 `1f265d997`；Paperclip 配套为合并 `80afcdbd2` 及当前请求渲染修复、表单测试
+`c71d69a54`、Machine Claude provider pack 宿主架构校验 `544f2ae82`。本节更新前面的
+“仅通过轻量检查”和“正在编译”状态；这是供 review 的检查点，不是准入开放或部署完成。
+
+- 本候选已完成 `bun run check`、99 个文件 1,003 项 TypeScript 测试、macOS ARM64 服务
+  和 BrowserOS/Claw 应用构建；静态检查保留 8 项 warning、5 项 info，Fallow 382 项提示
+  不作为已修复项。Rust workspace 1,439 项通过、1 项忽略，doctest 通过。
+- 实际候选 `Database::open` 在六种独立 SQLite 副本上完成旧迁移升级、重开、部分 DDL、
+  两次 doctor ledger 缺行及损坏库备份验证。没有改动真实用户 Claw 数据库。
+- 独立 Bun 服务连接独立 BrowserOS profile，真实 CDP 已验证 tabs list/new、navigate、
+  close；这只证明候选浏览器连接。尚未完成该候选上的模型、同 Task、Stop 和故障矩阵。
+  仍使用安装的 BrowserOS 0.51.0 内核，不能宣称已经部署上游新 Chromium 或新 credentials 能力。
+- Paperclip 的 Linux ARM64/x86_64 release daemon、完整 provider pack、machine.12 包
+  和运行镜像均已构建。x86_64 已执行 metadata、Node 实际架构、动态加载和安装文件哈希检查，
+  宿主是 ARM64 Docker，属于仿真执行，不是物理 x86 机器或模型故障恢复通过。
+
+旧 Claude Machine native 在 provider 强杀后的旧请求重放失败仍保留；修复的定向回归通过，
+**修复后十条路径的真实矩阵尚未开始**。计划覆盖两种 provider 各自的 ARM64/x86_64 Machine
+native、Machine CLI/ACP、本地 native，共 172 个场景及各自启动检查。Paperclip 仍有
+Dot Runner、Machine Stop 回调、启动测试 mock 和 Python 测试环境问题待收口，全仓测试
+尾部、最终构建及真实矩阵均不能提前记通过。详细失败边界见配套 Paperclip 维护文档同日检查点。
+
+本次只推送集成分支，不强推、不改变默认分支、不运行发布 Actions；本机现有服务、数据、
+OAuth、CLI/ACP 和 provider 配置未切换。后续只有最终候选通过真实资格后，才按既有备份和
+部署流程更新本机。上游新增手动 release-docker workflow 若尚未注册，应记录未注册，不能
+将其列为已禁用；已有工作流继续保持关闭。
