@@ -636,3 +636,26 @@ ARM64 沿用已完整实测的镜像和原 standalone，x64 CLI/ACP 使用 split
 资格冻结后还观察到 Paperclip `d69631b01`（新增 19 提交、459 路径）及 BrowserOS `512f9cc15`（新增 32 提交、211 路径），未合入本轮，不能沿用本节资格；后续需处理 Paperclip 0372–0374 迁移碰撞及新 Runner/provider 变化。fork 默认分支和 Actions 状态保持原状。
 
 逐通道结果、版本与摘要见[本轮资格记录](https://github.com/bloomchic-gz/paperclip/blob/codex/browseros-machine-integration-20261018/tests/browseros-machine-acceptance/reports/upstream-qualification-20261023.json)。
+
+## 本机部署收尾记录（2026-10-24）
+
+本机 Paperclip 后台已更新到 `3a38eeb62c6f786ace2d358737edb5590e4f8079`，BrowserOS server/web 源码及依赖已更新到 `0394f79e3c3ab5b7fa00e7230bebb7f7fd6df778`。本节记录部署状态，不扩大前一节的 156 项真实资格范围；x86_64 Machine native 继续关闭。
+
+数据库原生备份及冷副本保留。升级前后逐个核对原有业务身份和配置：3 个公司、25 个 Agent、161 个 Task、575 条评论、2 个 Machine、2 个用户全部保留，3 个 Environment 配置和原有 BrowserOS 连接稳定字段相同；26 个 session 没有增加或减少。迁移从 367 升到 378，状态为 upToDate。之后仅为本次部署新增一个 Docker ARM64 Machine 及 Codex/Claude 两个 Agent，原 CLI/ACP 和本地 native 配置未覆盖。它们已 online/ready，但这不等于部署后的真实 Task 验收通过。
+
+### 可复用的安装和恢复步骤
+
+1. 在独立 release 目录使用相同锁文件正常执行 `pnpm install --frozen-lockfile --offline --ignore-scripts`；本次 `--force` 曾误处理非本机架构的可选 Cursor 包而失败，原日志保留。复制已验证的 build 产物并核对摘要，不能仅复制旧 release 的依赖后宣称新 provider patch 已部署。
+2. `--ignore-scripts` 会跳过 `@embedded-postgres/darwin-arm64@18.1.0-beta.16` 的必要初始化。在该已锁定包的根目录执行其 `node scripts/hydrate-symlinks.js`，验证 `native/pg-symlinks.json` 的 17 个链接及目标文件摘要，并执行 `postgres --version`、`pg_ctl --version`、`initdb --version`，再停旧服务。本次遗漏导致新 PostgreSQL 无法加载 `libzstd.1.dylib`，已恢复旧服务后修正；没有恢复或重置用户数据库。
+3. 新建本机 PRP 私有 CA 与 leaf 时包含 `subjectKeyIdentifier`、`authorityKeyIdentifier`、CA/keyUsage、serverAuth 和实际访问域名 SAN。使用默认严格校验验证 TLS，而不是关闭证书检查。本次 Python 严格校验发现缺少 Authority Key Identifier；补齐后 TLS 1.3 验证通过。私钥只留本机，未修改全局信任库。
+4. `launchctl bootout` 后等待所属 HTTP/DB 端口退出；bootstrap 曾返回错误 5，稍后重试成功，原因未确定；仅在确认该 label 不存在时有限重试。保留新旧 plist、CLI 入口与每次失败日志；不能用按端口批量 kill 或恢复旧数据库代替进程恢复。
+5. BrowserOS 切换保留浏览器进程、原 profile、业务数据库及服务配置，只替换 server/web、依赖和扩展构建。`.internal-docs` 是未初始化且提交未变的 Git 子模块，应按 gitlink 检查，不当作普通文件或擅自拉取私有内容。业务 SQLite 冷副本已通过 integrity_check。活动 profile 只有 APFS 文件副本；`first_party_sets.db` 的在线备份因锁定超时，不能把该副本称为一致的全 profile 备份。
+6. 重载开发扩展之前先确认浏览器开发者模式状态。本次 `chrome.runtime.reload()` 后扩展被禁用，原因码 16777216；不能仅以 server 的 `cdpConnected=true` 判定扩展已更新。应在正常扩展管理界面恢复既有开发扩展，然后核对实际加载 JavaScript 与磁盘构建摘要；不要直接改 Secure Preferences、绕过禁用状态或重置 profile。
+
+### 尚待部署验收的边界
+
+BrowserOS 扩展 UI 尚未恢复：Mac 锁屏阻止桌面工具操作，解锁请求已发出。首次扩展重载失败的回退日志保留；随后只重新应用了已验证的 server/web，扩展状态仍单独待办。安装的浏览器内核仍为 0.51.0。8 个原有普通标签页 ID/URL 和浏览器 PID 保留；扩展停用关闭了两个 sidepanel 页面，原 URL 已保留用于恢复，不能声称全部 10 个 page target 都未变。
+
+两个原有 CLI Trio OAuth grant 在本次部署之前已因 refresh_token_replay 撤销，不能靠恢复旧 token 或修改授权表恢复。已通过真实登录的 Chrome 会话按原客户端、原 CLI Trio read/write/offline_access 范围重新连接两条本地路径，只替换其凭据；稳定 Agent ID、远端绑定、公司、模型和配置保留。CLI bearer 无权提交设备授权，401 记录保留。后台旧连接重试还触发了现有限流；维护时暂时停止对应服务流量并等待原 60 秒窗口，不改变限额。两个新 Machine 连接只请求 CLI Trio 的 read/write/offline_access，尚未提交新授权。本机 Codex `gpt-6.1-sol/low` 与 Claude `claude-sonnet-4-6/low` 已各通过实际 tabs list、同 Task 续聊两项，共 4 项；核对了真实工具参数、当前请求 final 回复、Task done 及评论写回。新增 2 个 Task、8 条评论均可追溯，原业务身份和配置再次核对通过。尚待新 Machine 两条路径的真实浏览器、同 Task、Stop/停止回执/租约恢复，以及扩展 UI 恢复，完成后才能将本机部署标记完成。前一节的隔离环境资格不能替代这一步。
+
+本节只更新部署记录，未重新执行已冻结的 156 项矩阵。各阶段状态及失败证据摘要见 [本机部署记录](https://github.com/bloomchic-gz/paperclip/blob/codex/browseros-machine-integration-20261018/tests/browseros-machine-acceptance/reports/local-deployment-20261024.json)。
