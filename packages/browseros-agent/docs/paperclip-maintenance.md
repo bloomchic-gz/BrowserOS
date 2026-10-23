@@ -659,3 +659,13 @@ BrowserOS 扩展 UI 尚未恢复：Mac 锁屏阻止桌面工具操作，解锁�
 两个原有 CLI Trio OAuth grant 在本次部署之前已因 refresh_token_replay 撤销，不能靠恢复旧 token 或修改授权表恢复。已通过真实登录的 Chrome 会话按原客户端、原 CLI Trio read/write/offline_access 范围重新连接两条本地路径，只替换其凭据；稳定 Agent ID、远端绑定、公司、模型和配置保留。CLI bearer 无权提交设备授权，401 记录保留。后台旧连接重试还触发了现有限流；维护时暂时停止对应服务流量并等待原 60 秒窗口，不改变限额。两个新 Machine 连接只请求 CLI Trio 的 read/write/offline_access，尚未提交新授权。本机 Codex `gpt-6.1-sol/low` 与 Claude `claude-sonnet-4-6/low` 已各通过实际 tabs list、同 Task 续聊两项，共 4 项；核对了真实工具参数、当前请求 final 回复、Task done 及评论写回。新增 2 个 Task、8 条评论均可追溯，原业务身份和配置再次核对通过。尚待新 Machine 两条路径的真实浏览器、同 Task、Stop/停止回执/租约恢复，以及扩展 UI 恢复，完成后才能将本机部署标记完成。前一节的隔离环境资格不能替代这一步。
 
 本节只更新部署记录，未重新执行已冻结的 156 项矩阵。各阶段状态及失败证据摘要见 [本机部署记录](https://github.com/bloomchic-gz/paperclip/blob/codex/browseros-machine-integration-20261018/tests/browseros-machine-acceptance/reports/local-deployment-20261024.json)。
+
+### Machine 连接与部署验收补记（2026-10-24）
+
+前述两个 Machine 授权待办已完成：用户确认仅限 CLI Trio，已在真实登录的 Chrome 页面分别提交 Codex、Claude 的 read/write/offline_access 授权，并通过 BrowserOS connection API 再次核对公司。沿用已创建的 Docker Machine 和两个 Paperclip Agent；续办脚本按注册客户端、设备授权、token 接收、BrowserOS Agent 创建逐步持久化，避免重跑初始化造成重复资源。旧 CLI/ACP、本地 native 及原连接稳定配置均保留。
+
+部署后的 ARM64 Machine Codex `gpt-6.1-sol/low`、Claude `claude-sonnet-5/low` 各通过四项：实际 `tabs action=list`、同 Task 续聊、执行前台 sleep 期间 Stop、Stop 后在同 Task 主动继续。两条 Stop 均观察到真实 provider/sleep 进程树退出，且租约 cleanup success/released；持久化停止回执的 run、lease、ownership、generation 和进程 identity 与启动记录一致。读浏览器阶段核对实际参数摘要、当前回合 final 回复、Task done 与评论写回，不以 online/ready 或模拟结果代替运行验收。
+
+本次只新增 8 项 Machine 部署检查，复用此前 4 项本地部署结果，共 12 项；没有重跑已冻结的 156 项资格矩阵。新增记录合计 2 个 Agent、1 个 Machine、4 个 Task、24 条评论，原有业务身份、Agent/Environment/BrowserOS 配置再次核对保留。数据库仍为 378 条迁移/upToDate，验收结束无 queued/running Run。8 个普通标签页 ID/URL、原浏览器 PID/出生信息保留。
+
+扩展 UI 仍是独立未完成项：用户回复已解锁后，桌面工具再次报告锁屏；当前仍未观察到目标 extension worker/sidepanel。已完成的真实浏览器调用来自运行中的 BrowserOS server 与原浏览器，不能据此宣称扩展恢复或全部本机部署完成。需要桌面可用后，通过正常扩展管理恢复既有扩展，核对加载脚本摘要并重开两个 sidepanel。原失败证据保留，x86_64 Machine native 继续关闭。
