@@ -669,3 +669,31 @@ BrowserOS 扩展 UI 尚未恢复：Mac 锁屏阻止桌面工具操作，解锁�
 本次只新增 8 项 Machine 部署检查，复用此前 4 项本地部署结果，共 12 项；没有重跑已冻结的 156 项资格矩阵。新增记录合计 2 个 Agent、1 个 Machine、4 个 Task、24 条评论，原有业务身份、Agent/Environment/BrowserOS 配置再次核对保留。数据库仍为 378 条迁移/upToDate，验收结束无 queued/running Run。8 个普通标签页 ID/URL、原浏览器 PID/出生信息保留。
 
 扩展 UI 仍是独立未完成项：用户回复已解锁后，桌面工具再次报告锁屏；当前仍未观察到目标 extension worker/sidepanel。已完成的真实浏览器调用来自运行中的 BrowserOS server 与原浏览器，不能据此宣称扩展恢复或全部本机部署完成。需要桌面可用后，通过正常扩展管理恢复既有扩展，核对加载脚本摘要并重开两个 sidepanel。原失败证据保留，x86_64 Machine native 继续关闭。
+
+## Paperclip 官方 beta 对齐（2026-10-24）
+
+Paperclip 已将官方 `2026.1023.0-beta.0`（tag `beta/v2026.1023.0-beta.0`、上游 `d69631b01b9c658f80bf8bed389863dce82643e1`）合入集成分支，代码提交 `3ba7bcdffce371e989c1e87598cb7848e3fbb36a`，新增 19 条上游提交。BrowserOS 产品代码保持 `ffb5ea93f` 的已验证状态。本节记录与该 beta 的兼容性，不代表 BrowserOS 已合入后来观察到的上游提交。
+
+Paperclip 上游 0372–0374 顺延到 0377–0379，旧 SQL 和 journal 保持不变，0380 仅对齐标准生成器产出的 snapshot。存量数据库只读备份在隔离 PostgreSQL 完成 378→382 迁移，原有 307 张表的旧列值和历史回执全部保留，重复升级无变化。Copilot 历史身份冲突通过保留两种 v58 及 fork v59、生成 v60 处理；Codex/Claude profile 和准入范围保持不变。过期 Git 工作区的上游自动恢复先解析宿主，Machine 不执行控制端的文件恢复。
+
+全仓类型检查、构建、UI token 检查，以及全部 75 个改动测试文件和自有边界共 4,671 项代码检查通过。本次新增六条真实路径通过：Codex/Claude 本地 native 的 Stop 与同 Task 显式恢复；两者 ARM64 Machine native 的生产浏览器旅程、独立 Stop、执行宿主强杀恢复；Codex Machine CLI/ACP 的真实浏览器与 Stop。未知浏览器动作不自动重放，停止检查包含物理进程退出与租约释放。Machine 为同机独立 ARM64 Docker 容器，不等于物理跨机器故障验收。
+
+本次测试的 CLI/ACP standalone 来自合并源码，归档 SHA256 `9e8cb01c042e51ce01681c147a5a9a38c91d18be859434f93997a23d0df5062f`，镜像 ID `sha256:5d6281507e13ed3e13ab9d6fe84e6615861977b59d1436527de409d02df1530c`。Codex/Claude 的 Linux daemon/provider assets 复用前次已验证产物，未开放 Copilot 或 x86_64 Machine native。原浏览器启动/CDP 超时及 Claude 夹具默认模型被准入拒绝的首次失败都保留；复验成功不证明未查明的超时根因已修复。未改动的旧矩阵沿用先前资格，主动中止的全仓默认测试不计为通过。
+
+具体范围和原始结果摘要见 [beta 验证说明](https://github.com/bloomchic-gz/paperclip/blob/codex/browseros-machine-integration-20261018/tests/browseros-machine-acceptance/beta-sync-validation-2026-10-24.md) 与 [资格报告](https://github.com/bloomchic-gz/paperclip/blob/codex/browseros-machine-integration-20261018/tests/browseros-machine-acceptance/reports/paperclip-beta-qualification-20261024.json)。扩展 UI 和 x86_64 Machine native 的独立限制继续保留。
+
+### beta 本机部署复核
+
+本机 Paperclip 已更新到上述代码提交，版本标识为 `2026.1023.0-beta.0-browseros.3ba7bcdff`。切换前保留原生 pg_dump、冷数据副本、原服务配置和 CLI 入口；锁文件安装及 PostgreSQL 的 17 个动态库链接和启动文件检查通过后，才在无活动 Run 时重启。在线迁移从 378 到 382，状态 upToDate。原有 3 个公司、27 个 Agent、166 个 Task、600 条评论、3 个 Machine、2 个用户及 26 个 session 保留；Agent、Environment、BrowserOS 连接和实例配置均未覆盖。
+
+部署后使用原有连接重新完成 12 项真实检查：本地 Codex/Claude 各验证实际浏览器工具与同 Task 续聊；ARM64 Machine Codex/Claude 各验证实际浏览器、同 Task、Stop 与停止回执/租约、Stop 后显式继续。核对当前回合 final 回复、Task done 和结果写回，两条 Machine Stop 均验证实际进程身份消失及停止回执与 launch/run/lease/generation 匹配。仅新增 4 个验收 Task 和 29 条验收评论，未新建 Agent、Machine 或 OAuth 授权。验收结束没有 queued/running Run，8 个日常普通标签页保持不变。
+
+既有 Machine 容器和已验证 native 产物保留；本次部署验收证明新控制端与它们可协作，不声称容器已换成 beta 测试镜像。BrowserOS 本次仅补充维护文档，运行代码和原浏览器保持不变。扩展 UI 仍独立待恢复，x86_64 Machine native 继续关闭。不把已通过的后台真实浏览器调用当作扩展界面验收。
+
+本次部署首个 Machine Codex Run 在启动 provider 前因 `runner_runtime_incompatible` 失败：复制全新 Mac build 的 dist 覆盖了原 release 单独放入的 Linux target 目录，解析器只找到 Darwin 二进制。首次失败与原 Task 均保留。按前次资格 SHA256 补齐 Linux ARM64/x64 daemon 和 provider pack 后，在同一失败 Task 中显式继续并完成 Machine 验收；未更改源码、时限、凭据或准入，也未重启或替换现有 Machine 容器。
+
+后续部署必须在复制全部 build 输出之后、停旧服务之前，向 `packages/paperclip-runner/dist` 和 `server/dist/vendor/paperclip-runner` 两处分别装入 `bin/linux-{arm64,x64}/paperclip-runnerd` 与 `remote-provider-packs/linux-{arm64,x64}`。只使用已有明确资格的产物，核对二进制 SHA256/ELF 架构、`provider-pack.json` 摘要及其中 artifact 哈希，再用该 release 的 `resolvePackagedRunnerBinary` 验证两个布局的目标解析。不能只检查 Mac 本地启动，不能把 Linux 产物复制到无目标目录的 `bin/paperclip-runnerd`，也不能以 staging x64 产物为由开放 x64 native 准入。
+
+Claude Machine 首轮实际 final 事件完整，浏览器标签数和 Task 写回正确，但最终回复把验收 UUID 的一段 `a3cc` 抄成 `a3c`，触发精确标识断言。保留该失败和完整事件，在同一 Task 使用较短的随机唯一标识继续，仍要求实际 final 中精确匹配；未改产品源码或放宽断言。已通过的 Codex 四项直接复用，避免重复运行。
+
+此 fork 采用源码部署，`paperclipai --version` 仍读取源码 `cli/package.json` 的 `0.3.1`，与官方 beta tag 中该文件一致。对齐的 npm 通道版本为 `2026.1023.0-beta.0`；安装版本核对应使用 `/api/health` 的 commit、`server/dist/build-info.json` 和合并提交的 beta ancestry。不要仅凭源码 CLI 的版本号重新安装官方 npm 包而覆盖自有集成。
